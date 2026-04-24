@@ -13,7 +13,9 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY")!;
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")!;
+
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
@@ -47,7 +49,7 @@ Deno.serve(async (req) => {
       return `- ${date} • ${h.service ?? "Service"} • ${h.mileage_at_service ?? "?"} km • ₹${h.cost ?? "?"} • Notes: ${h.notes ?? "—"} • Parts: ${h.parts_used ?? "—"}`;
     }).join("\n");
 
-    const prompt = `You are an expert automotive service advisor briefing a technician about to work on this vehicle.
+    const userPrompt = `You are an expert automotive service advisor briefing a technician about to work on this vehicle.
 
 Vehicle: ${vehicle.year} ${vehicle.make} ${vehicle.model} (${vehicle.fuel_type ?? "Petrol"})
 Registration: ${vehicle.registration ?? "—"}
@@ -65,31 +67,24 @@ Write a concise 4-6 line briefing that:
 
 Use plain, clear language. Flowing paragraphs only — no bullet points. Address the technician, not the customer.`;
 
-    const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const res = await fetch(GEMINI_URL, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: "You are a senior automotive service advisor. Be concise, technical and actionable." },
-          { role: "user", content: prompt },
-        ],
+        system_instruction: { parts: [{ text: "You are a senior automotive service advisor. Be concise, technical and actionable." }] },
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
       }),
     });
 
-    if (aiRes.status === 429) return json(429, { error: "Rate limited, please retry shortly" });
-    if (aiRes.status === 402) return json(402, { error: "AI credits exhausted" });
-    if (!aiRes.ok) {
-      const text = await aiRes.text();
-      console.error("AI error", aiRes.status, text);
-      return json(500, { error: `AI error ${aiRes.status}` });
+    if (res.status === 429) return json(429, { error: "Rate limited, please retry shortly" });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("Gemini error", res.status, text);
+      return json(500, { error: `AI error ${res.status}` });
     }
 
-    const data = await aiRes.json();
-    const summary = data?.choices?.[0]?.message?.content ?? "Unable to generate summary.";
+    const data = await res.json();
+    const summary = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "Unable to generate summary.";
     return json(200, { summary });
   } catch (e) {
     console.error(e);

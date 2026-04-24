@@ -11,9 +11,53 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY")!;
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")!;
+
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
+async function callGemini(systemPrompt: string, userPrompt: string, jsonMode = true): Promise<string> {
+  const body: any = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+  };
+  if (jsonMode) {
+    body.generationConfig = { responseMimeType: "application/json" };
+  }
+  const res = await fetch(GEMINI_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 429) throw Object.assign(new Error("Rate limited"), { status: 429 });
+  if (!res.ok) throw Object.assign(new Error(`Gemini error ${res.status}`), { status: res.status });
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+}
+
+async function callGeminiChat(systemPrompt: string, history: Array<{ role: string; content: string }>, jsonMode = true): Promise<string> {
+  const contents = history.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+  const body: any = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents,
+  };
+  if (jsonMode) {
+    body.generationConfig = { responseMimeType: "application/json" };
+  }
+  const res = await fetch(GEMINI_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 429) throw Object.assign(new Error("Rate limited"), { status: 429 });
+  if (!res.ok) throw Object.assign(new Error(`Gemini error ${res.status}`), { status: res.status });
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -28,7 +72,6 @@ Deno.serve(async (req) => {
 
       const ctx = body.context ?? {};
 
-      // Build a readable vehicle list for the prompt
       const vehicleList = Array.isArray(ctx.vehicles) && ctx.vehicles.length > 0
         ? ctx.vehicles.map((v: any) => `  - id: "${v.id}" → ${v.label} (${v.registration}, ${v.mileage} km)`).join("\n")
         : "  (none registered)";
@@ -83,37 +126,23 @@ Rules:
 - Keep replies under 6 sentences unless the user asks for detail.
 - Always respond with valid JSON — no markdown, no preamble.`;
 
-      const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "google/gemini-2.5-flash",
-          messages: [{ role: "system", content: systemPrompt }, ...history],
-          response_format: { type: "json_object" },
-        }),
-      });
-
-      if (aiRes.status === 429) return json(429, { error: "Rate limited" });
-      if (aiRes.status === 402) return json(402, { error: "AI credits exhausted" });
-      if (!aiRes.ok) return json(500, { error: `AI error ${aiRes.status}` });
-
-      const data = await aiRes.json();
-      const raw = data?.choices?.[0]?.message?.content ?? "{}";
-
-      let parsed: any = {};
-      try { parsed = JSON.parse(raw); } catch { parsed = { reply: raw }; }
-
-      const reply = String(parsed.reply ?? parsed.message ?? "Sorry, I couldn't generate a response.");
-      const booking_intent = parsed.booking_intent ?? null;
-
-      return json(200, { reply, booking_intent });
+      try {
+        const raw = await callGeminiChat(systemPrompt, history, true);
+        let parsed: any = {};
+        try { parsed = JSON.parse(raw); } catch { parsed = { reply: raw }; }
+        const reply = String(parsed.reply ?? parsed.message ?? "Sorry, I couldn't generate a response.");
+        const booking_intent = parsed.booking_intent ?? null;
+        return json(200, { reply, booking_intent });
+      } catch (e: any) {
+        if (e.status === 429) return json(429, { error: "Rate limited" });
+        return json(500, { error: String(e) });
+      }
     }
 
     // ============ DIAGNOSTICS MODE (default) ============
     const { symptoms, vehicle } = body;
     if (!symptoms) return json(400, { error: "symptoms required" });
 
-    // Use catalog from request if provided, else fetch from DB
     let catalog: Array<{ id: string; name: string; category: string; price: number; description?: string | null }>;
     if (Array.isArray(body.catalog) && body.catalog.length > 0) {
       catalog = body.catalog;
@@ -125,7 +154,7 @@ Rules:
     const catalogText = catalog.map((s) => `- ${s.id} | ${s.name} [${s.category}] – ₹${s.price}`).join("\n");
     const vehInfo = vehicle ? `${vehicle.year ?? "?"} ${vehicle.make ?? ""} ${vehicle.model ?? ""} (${vehicle.fuel_type ?? "Petrol"}, ${vehicle.mileage ?? "?"} km)` : "Unknown vehicle";
 
-    const prompt = `Vehicle: ${vehInfo}
+    const userPrompt = `Vehicle: ${vehInfo}
 Customer's symptoms: ${symptoms}
 
 Available services (use the IDs verbatim):
@@ -146,49 +175,35 @@ Rules:
 - recommended_service_ids must use ONLY ids from the list above; pick 1–3 most relevant.
 - proTip should be plain English, friendly, and actionable.`;
 
-    const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: "You are an experienced automotive diagnostic technician for the Indian market. Output valid JSON only, exactly matching the requested schema." },
-          { role: "user", content: prompt },
-        ],
-        response_format: { type: "json_object" },
-      }),
-    });
+    try {
+      const raw = await callGemini(
+        "You are an experienced automotive diagnostic technician for the Indian market. Output valid JSON only, exactly matching the requested schema.",
+        userPrompt,
+        true
+      );
 
-    if (aiRes.status === 429) return json(429, { error: "Rate limited" });
-    if (aiRes.status === 402) return json(402, { error: "AI credits exhausted" });
-    if (!aiRes.ok) {
-      const text = await aiRes.text();
-      console.error("AI error", aiRes.status, text);
-      return json(500, { error: `AI error ${aiRes.status}` });
+      let parsed: any = {};
+      try { parsed = JSON.parse(raw); } catch { return json(500, { error: "Invalid AI response" }); }
+
+      const faults = Array.isArray(parsed.faults)
+        ? parsed.faults.map((f: any) => ({
+            name: String(f.name ?? "Possible issue"),
+            description: String(f.description ?? ""),
+            confidence: Math.max(0, Math.min(100, Math.round(Number(f.confidence ?? 50)))),
+          }))
+        : [];
+
+      const validIds = new Set(catalog.map((s) => s.id));
+      const recommended_service_ids = Array.isArray(parsed.recommended_service_ids)
+        ? parsed.recommended_service_ids.filter((id: any) => validIds.has(String(id)))
+        : [];
+
+      const proTip = String(parsed.proTip ?? parsed.advice ?? "Get this checked at the workshop soon.");
+      return json(200, { faults, recommended_service_ids, proTip });
+    } catch (e: any) {
+      if (e.status === 429) return json(429, { error: "Rate limited" });
+      return json(500, { error: String(e) });
     }
-
-    const data = await aiRes.json();
-    const raw = data?.choices?.[0]?.message?.content ?? "{}";
-    let parsed: any = {};
-    try { parsed = JSON.parse(raw); } catch { return json(500, { error: "Invalid AI response" }); }
-
-    // Sanitise / coerce output to expected shape
-    const faults = Array.isArray(parsed.faults)
-      ? parsed.faults.map((f: any) => ({
-          name: String(f.name ?? "Possible issue"),
-          description: String(f.description ?? ""),
-          confidence: Math.max(0, Math.min(100, Math.round(Number(f.confidence ?? 50)))),
-        }))
-      : [];
-
-    const validIds = new Set(catalog.map((s) => s.id));
-    const recommended_service_ids = Array.isArray(parsed.recommended_service_ids)
-      ? parsed.recommended_service_ids.filter((id: any) => validIds.has(String(id)))
-      : [];
-
-    const proTip = String(parsed.proTip ?? parsed.advice ?? "Get this checked at the workshop soon.");
-
-    return json(200, { faults, recommended_service_ids, proTip });
   } catch (e) {
     console.error(e);
     return json(500, { error: String(e) });

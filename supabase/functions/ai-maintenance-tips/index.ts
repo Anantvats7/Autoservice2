@@ -9,7 +9,9 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY")!;
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")!;
+
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
@@ -28,7 +30,6 @@ Deno.serve(async (req) => {
   try {
     const body = (await req.json()) as Body;
 
-    // Resolve vehicle profile (DB lookup OR direct attributes)
     let vehicle: { make: string; model: string; year: number; mileage: number; fuel_type: string | null; id?: string } | null = null;
     let recentServiceNames: string[] = [];
 
@@ -59,7 +60,7 @@ Deno.serve(async (req) => {
     const { data: services } = await admin.from("services").select("id, name, category, price").eq("active", true);
     const catalog = (services ?? []).map((s: any) => `${s.name} [${s.category}] – ₹${s.price}`).join("\n");
 
-    const prompt = `Vehicle profile:
+    const userPrompt = `Vehicle profile:
 - ${vehicle!.year} ${vehicle!.make} ${vehicle!.model} (${vehicle!.fuel_type ?? "Petrol"})
 - Current mileage: ${vehicle!.mileage} km
 - Recent services: ${recentServiceNames.length ? recentServiceNames.join(", ") : "none recorded"}
@@ -78,25 +79,21 @@ Important:
 - Skip services already done in the last 30 days unless mileage warrants.
 - For EVs, never recommend oil/spark plug services.`;
 
-    const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const res = await fetch(GEMINI_URL, {
       method: "POST",
-      headers: { "Authorization": `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: "You are an expert automotive maintenance advisor for Indian car owners. Reply with valid JSON only, no preamble." },
-          { role: "user", content: prompt },
-        ],
-        response_format: { type: "json_object" },
+        system_instruction: { parts: [{ text: "You are an expert automotive maintenance advisor for Indian car owners. Reply with valid JSON only, no preamble." }] },
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        generationConfig: { responseMimeType: "application/json" },
       }),
     });
 
-    if (aiRes.status === 429) return json(429, { error: "Rate limited" });
-    if (aiRes.status === 402) return json(402, { error: "AI credits exhausted" });
-    if (!aiRes.ok) return json(500, { error: `AI error ${aiRes.status}` });
+    if (res.status === 429) return json(429, { error: "Rate limited" });
+    if (!res.ok) return json(500, { error: `AI error ${res.status}` });
 
-    const data = await aiRes.json();
-    const raw = data?.choices?.[0]?.message?.content ?? "{}";
+    const data = await res.json();
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
     let parsed: any = {};
     try { parsed = JSON.parse(raw); } catch { parsed = { tips: [raw], recommended_service_names: [] }; }
 
