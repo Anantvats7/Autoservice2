@@ -101,7 +101,18 @@ Deno.serve(async (req) => {
         ? `ACTIVE VEHICLE (use this by default): id="${activeVehicle.id}" → ${activeVehicle.label} (${activeVehicle.registration}, ${activeVehicle.mileage} km)`
         : "No active vehicle selected.";
 
-      const systemPrompt = `You are AutoServe AI, an expert assistant for an Indian car-service workshop.
+      // ── Detect manager/analyst mode (no vehicles or services in context) ──
+      const isAnalystMode = (!Array.isArray(ctx.vehicles) || ctx.vehicles.length === 0) &&
+                            (!Array.isArray(ctx.services) || ctx.services.length === 0);
+
+      const systemPrompt = isAnalystMode
+        ? `You are a business analyst AI for AutoServe, an Indian automotive workshop in Gurugram.
+Answer the user's question directly and concisely based on the data they provide.
+Write plain paragraphs, no bullet points unless asked. Be specific with numbers.
+Do not mention vehicles, bookings, or ask about cars — focus purely on the business data provided.
+Always respond with valid JSON: { "reply": "your response here" }`
+        : `You are AutoServe AI, an expert assistant for an Indian car-service workshop.
+        : `You are AutoServe AI, an expert assistant for an Indian car-service workshop.
 Be concise, friendly, and use Indian Rupees (₹).
 
 Customer: ${ctx.customer?.name ?? "Customer"}
