@@ -1,9 +1,5 @@
 // Generates an AI-written maintenance summary for a vehicle from its service history.
 // Used on Employee JobDetail page so technicians get a fast brief on past work.
-//
-// Accepts EITHER:
-//   { vehicle_id }                                          — server fetches everything
-//   { vehicle: {...}, history: [...], current_service? }    — client supplies context
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const corsHeaders = {
@@ -14,14 +10,29 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
+// ── Retry with exponential backoff ───────────────────────────────────────────
+async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
+  let lastError: Error = new Error("Unknown error");
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 && res.status !== 503) return res;
+    const retryAfter = res.headers.get("Retry-After");
+    const waitMs = retryAfter
+      ? parseInt(retryAfter) * 1000
+      : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 16000);
+    console.warn(`Gemini rate limited. Attempt ${attempt + 1}/${maxRetries}. Waiting ${waitMs}ms...`);
+    if (attempt < maxRetries) await new Promise((r) => setTimeout(r, waitMs));
+    lastError = Object.assign(new Error("Rate limited after retries"), { status: 429 });
+  }
+  throw lastError;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
-
   if (!GEMINI_API_KEY) return json(500, { error: "GEMINI_API_KEY is not configured in Supabase secrets" });
 
   try {
@@ -51,9 +62,7 @@ Deno.serve(async (req) => {
       return `- ${date} • ${h.service ?? "Service"} • ${h.mileage_at_service ?? "?"} km • ₹${h.cost ?? "?"} • Notes: ${h.notes ?? "—"} • Parts: ${h.parts_used ?? "—"}`;
     }).join("\n");
 
-    const userPrompt = `You are an expert automotive service advisor briefing a technician about to work on this vehicle.
-
-Vehicle: ${vehicle.year} ${vehicle.make} ${vehicle.model} (${vehicle.fuel_type ?? "Petrol"})
+    const userPrompt = `Vehicle: ${vehicle.year} ${vehicle.make} ${vehicle.model} (${vehicle.fuel_type ?? "Petrol"})
 Registration: ${vehicle.registration ?? "—"}
 Current Odometer: ${vehicle.mileage ?? "?"} km
 ${currentService ? `Today's job: ${currentService}` : ""}
@@ -69,7 +78,7 @@ Write a concise 4-6 line briefing that:
 
 Use plain, clear language. Flowing paragraphs only — no bullet points. Address the technician, not the customer.`;
 
-    const res = await fetch(GEMINI_URL, {
+    const res = await fetchWithRetry(GEMINI_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -78,7 +87,6 @@ Use plain, clear language. Flowing paragraphs only — no bullet points. Address
       }),
     });
 
-    if (res.status === 429) return json(429, { error: "Rate limited, please retry shortly" });
     if (!res.ok) {
       const text = await res.text();
       console.error("Gemini error", res.status, text);
@@ -88,8 +96,9 @@ Use plain, clear language. Flowing paragraphs only — no bullet points. Address
     const data = await res.json();
     const summary = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "Unable to generate summary.";
     return json(200, { summary });
-  } catch (e) {
+  } catch (e: any) {
     console.error(e);
+    if (e.status === 429) return json(429, { error: "Rate limited. Please try again in a moment." });
     return json(500, { error: String(e) });
   }
 });

@@ -10,10 +10,26 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
+// ── Retry with exponential backoff ───────────────────────────────────────────
+async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
+  let lastError: Error = new Error("Unknown error");
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 && res.status !== 503) return res;
+    const retryAfter = res.headers.get("Retry-After");
+    const waitMs = retryAfter
+      ? parseInt(retryAfter) * 1000
+      : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 16000);
+    console.warn(`Gemini rate limited. Attempt ${attempt + 1}/${maxRetries}. Waiting ${waitMs}ms...`);
+    if (attempt < maxRetries) await new Promise((r) => setTimeout(r, waitMs));
+    lastError = Object.assign(new Error("Rate limited after retries"), { status: 429 });
+  }
+  throw lastError;
+}
 
 interface Body {
   vehicle_id?: string;
@@ -26,7 +42,6 @@ interface Body {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
-
   if (!GEMINI_API_KEY) return json(500, { error: "GEMINI_API_KEY is not configured in Supabase secrets" });
 
   try {
@@ -81,7 +96,7 @@ Important:
 - Skip services already done in the last 30 days unless mileage warrants.
 - For EVs, never recommend oil/spark plug services.`;
 
-    const res = await fetch(GEMINI_URL, {
+    const res = await fetchWithRetry(GEMINI_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -91,7 +106,6 @@ Important:
       }),
     });
 
-    if (res.status === 429) return json(429, { error: "Rate limited" });
     if (!res.ok) return json(500, { error: `AI error ${res.status}` });
 
     const data = await res.json();
@@ -108,8 +122,9 @@ Important:
       recommended_service_ids: recIds,
       recommended_service_names: parsed.recommended_service_names ?? [],
     });
-  } catch (e) {
+  } catch (e: any) {
     console.error(e);
+    if (e.status === 429) return json(429, { error: "Rate limited. Please try again in a moment." });
     return json(500, { error: String(e) });
   }
 });
