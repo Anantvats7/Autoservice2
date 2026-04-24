@@ -1,0 +1,1 @@
+ALTER TABLE public.service_reminders REPLICA IDENTITY FULL;

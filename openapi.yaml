@@ -1,0 +1,4152 @@
+openapi: 3.0.3
+
+info:
+  title: AutoServe Workshop Management API
+  description: >
+    Complete, industry-standard REST API specification for **AutoServe** – an Indian
+    car-service workshop management platform built on Supabase.
+
+    ## API Surface
+
+    | Layer | Base path | Description |
+    |---|---|---|
+    | **Supabase Auth** | `/auth/v1/` | GoTrue authentication – signup, sign-in, session management, password recovery, OTP |
+    | **PostgREST (CRUD)** | `/rest/v1/` | Auto-generated REST API for every database table + RPC functions |
+    | **Edge Functions** | `/functions/v1/` | Custom serverless business logic (AI, admin operations, demo seeding) |
+
+    ## Authentication
+
+    Every request (except `OPTIONS` pre-flight) **must** include:
+
+    - `apikey: <SUPABASE_ANON_KEY>` header – identifies the Supabase project.
+    - `Authorization: Bearer <JWT>` header – required for all protected endpoints.
+      The JWT is obtained from the Auth endpoints and auto-refreshed by the client SDK.
+
+    ## Row-Level Security
+
+    All PostgREST endpoints enforce Postgres RLS policies.  Responses are
+    automatically scoped to the authenticated user's role:
+
+    | Role | Capabilities |
+    |---|---|
+    | `customer` | Own profile, own vehicles, own bookings, own service history, own notifications |
+    | `employee` | All of the above + all bookings queue, inventory read/update, service history write |
+    | `manager` | Full access to all tables |
+
+    ## PostgREST Filtering
+
+    Query parameters use the pattern `column=operator.value`, e.g.
+    `?status=eq.pending`, `?price=gte.1000`, `?id=in.(uuid1,uuid2)`.
+
+    Common operators: `eq` `neq` `lt` `lte` `gt` `gte` `like` `ilike` `is` `in` `not`.
+
+    Combine with `select` for column projection, `order` for sorting, and
+    `limit`/`offset` for pagination.
+  version: "1.0.0"
+  contact:
+    name: AutoServe Engineering
+    email: support@autoserve.in
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+# ---------------------------------------------------------------------------
+# Servers
+# ---------------------------------------------------------------------------
+servers:
+  - url: https://{projectRef}.supabase.co
+    description: Supabase project endpoint
+    variables:
+      projectRef:
+        default: your-project-ref
+        description: >
+          Your Supabase project reference ID (found in Project Settings → API).
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+tags:
+  - name: Auth
+    description: GoTrue authentication endpoints – signup, sign-in, session management, password recovery, magic-link OTP.
+  - name: Profiles
+    description: User profile records (one per auth user).
+  - name: UserRoles
+    description: Role assignments for users (`manager`, `employee`, `customer`).
+  - name: Vehicles
+    description: Customer-owned vehicles registered in the system.
+  - name: Services
+    description: Service catalogue – list of available workshop services.
+  - name: Inventory
+    description: Parts and consumables inventory.
+  - name: Bookings
+    description: Service booking records linking customers, vehicles, and services.
+  - name: ServiceHistory
+    description: Completed service records written automatically on booking completion.
+  - name: Notifications
+    description: In-app notifications for all user types.
+  - name: ServiceReminders
+    description: Scheduled maintenance reminders for customers.
+  - name: RPC
+    description: Postgres RPC (Remote Procedure Call) functions exposed via PostgREST.
+  - name: EdgeFunctions
+    description: Supabase Edge Functions – custom serverless endpoints for AI features and admin operations.
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+security:
+  - BearerAuth: []
+    ApiKeyAuth: []
+
+# ===========================================================================
+# PATHS
+# ===========================================================================
+paths:
+
+  # =========================================================================
+  # AUTH – /auth/v1/
+  # =========================================================================
+
+  /auth/v1/signup:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      description: >
+        Creates a new user account. On success Supabase also fires the
+        `on_auth_user_created` trigger which inserts a `profiles` row and
+        assigns the `customer` role (or a role supplied via `user_metadata.role`).
+      operationId: auth_signup
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignUpRequest'
+            example:
+              email: "aarav.kapoor@example.in"
+              password: "Secure@123"
+              data:
+                full_name: "Aarav Kapoor"
+                phone: "+91 98100 33333"
+                role: "customer"
+      responses:
+        "200":
+          description: User created successfully (email confirmation may be required depending on project settings).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        "400":
+          description: Validation error (e.g., weak password, invalid email).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+              example:
+                error: "invalid_request"
+                error_description: "Password should be at least 6 characters."
+        "422":
+          description: User already registered with this email.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  /auth/v1/token:
+    post:
+      tags: [Auth]
+      summary: Sign in (obtain access & refresh tokens)
+      description: >
+        Authenticates an existing user and returns a JWT access token plus a
+        refresh token. Supports two grant types:
+
+        - `password` – email + password sign-in.
+        - `refresh_token` – exchange a refresh token for a new access token.
+      operationId: auth_token
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: grant_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [password, refresh_token]
+          description: OAuth 2.0 grant type.
+          example: password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/PasswordSignInRequest'
+                - $ref: '#/components/schemas/RefreshTokenRequest'
+            examples:
+              password:
+                summary: Sign in with email and password
+                value:
+                  email: "manager@autoserve.in"
+                  password: "autoserve@123"
+              refresh:
+                summary: Refresh access token
+                value:
+                  refresh_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      responses:
+        "200":
+          description: Authentication successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        "400":
+          description: Invalid credentials or expired refresh token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+              example:
+                error: "invalid_grant"
+                error_description: "Invalid login credentials"
+
+  /auth/v1/logout:
+    post:
+      tags: [Auth]
+      summary: Sign out – invalidate session
+      description: >
+        Revokes the user's current refresh token and invalidates the session
+        server-side. The `Authorization: Bearer {jwt}` header is required.
+      operationId: auth_logout
+      responses:
+        "204":
+          description: Successfully signed out – no body returned.
+        "401":
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  /auth/v1/user:
+    get:
+      tags: [Auth]
+      summary: Get the currently authenticated user
+      description: Returns the auth user object for the bearer token provided.
+      operationId: auth_get_user
+      responses:
+        "200":
+          description: Authenticated user details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUser'
+        "401":
+          description: Missing or invalid JWT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+    put:
+      tags: [Auth]
+      summary: Update the currently authenticated user
+      description: >
+        Updates the authenticated user's email, password, phone, or
+        `user_metadata`. Partial updates are supported – only send the fields
+        you wish to change.
+      operationId: auth_update_user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+            example:
+              data:
+                full_name: "Aarav Kapoor Updated"
+                phone: "+91 98100 44444"
+      responses:
+        "200":
+          description: User updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUser'
+        "401":
+          description: Unauthenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+        "422":
+          description: Validation error (e.g., email already in use).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  /auth/v1/recover:
+    post:
+      tags: [Auth]
+      summary: Send password-reset email
+      description: >
+        Sends a password-reset link to the given email address. The link
+        includes a token that must be verified via `/auth/v1/verify`.
+      operationId: auth_recover
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "aarav.kapoor@example.in"
+      responses:
+        "200":
+          description: Reset email sent (always returns 200 to prevent email enumeration).
+          content:
+            application/json:
+              schema:
+                type: object
+                example: {}
+        "400":
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  /auth/v1/otp:
+    post:
+      tags: [Auth]
+      summary: Send magic-link / OTP
+      description: >
+        Sends a one-time password (magic link) to the specified email or phone.
+        The user can then sign in without a password.
+      operationId: auth_otp
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "customer@autoserve.in"
+                create_user:
+                  type: boolean
+                  default: false
+                  description: Create the user if they don't already exist.
+      responses:
+        "200":
+          description: OTP sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                example: {}
+        "400":
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  /auth/v1/verify:
+    post:
+      tags: [Auth]
+      summary: Verify OTP / password-reset token
+      description: Verifies a one-time password or recovery token and returns a new session.
+      operationId: auth_verify
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, token]
+              properties:
+                type:
+                  type: string
+                  enum: [signup, recovery, magiclink, email_change, sms, phone_change]
+                token:
+                  type: string
+                  description: The OTP or recovery token from the email/SMS.
+                email:
+                  type: string
+                  format: email
+                  description: Required for email-based verification.
+                phone:
+                  type: string
+                  description: Required for SMS-based verification.
+      responses:
+        "200":
+          description: Verification successful – returns a new session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        "400":
+          description: Invalid or expired token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthError'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/profiles
+  # =========================================================================
+
+  /rest/v1/profiles:
+    head:
+      tags: [Profiles]
+      summary: Count profiles matching filter (no body returned)
+      description: >
+        Returns only HTTP headers (including `Content-Range`) for the profiles
+        collection. Use with `Prefer: count=exact` to retrieve the total count
+        of rows matching the filter without fetching data. Useful for pagination.
+      operationId: profiles_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Headers only – `Content-Range` contains the row count.
+          headers:
+            Content-Range:
+              description: "Row range and total, e.g. `0-0/42`."
+              schema: { type: string, example: "0-0/42" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Profiles]
+      summary: List / filter profiles
+      description: >
+        Returns profiles visible to the authenticated user.
+        - **Customer**: own profile only.
+        - **Employee / Manager**: all profiles.
+      operationId: profiles_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – filter by profile primary key."
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – filter by auth user ID."
+        - name: full_name
+          in: query
+          schema: { type: string }
+          description: "`ilike.*search*` – case-insensitive name search."
+      responses:
+        "200":
+          description: Array of profile objects.
+          headers:
+            Content-Range:
+              description: >
+                Present when `Prefer: count=exact|planned|estimated` is sent.
+                Format: `{from}-{to}/{total}`, e.g. `0-9/42`.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Profile'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Profiles]
+      summary: Create a profile
+      description: >
+        Inserts a new profile row. In practice, the `on_auth_user_created`
+        trigger creates profiles automatically on user registration.
+        Manual creation is typically used only in admin/test scenarios.
+      operationId: profiles_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileInsert'
+            example:
+              user_id: "550e8400-e29b-41d4-a716-446655440000"
+              full_name: "Aarav Kapoor"
+              phone: "+91 98100 33333"
+      responses:
+        "201":
+          description: "Profile created. Returns the created object when `Prefer: return=representation`."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Profiles]
+      summary: Update profile(s) matching filter
+      description: >
+        Updates profiles that match the query-parameter filter.
+        Always supply a precise filter (e.g., `?user_id=eq.{id}`) to avoid
+        accidental bulk updates.
+      operationId: profiles_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – target profile primary key."
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – target by auth user ID."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdate'
+            example:
+              full_name: "Aarav Kapoor"
+              phone: "+91 98100 55555"
+              avatar_url: "https://cdn.example.in/avatars/aarav.jpg"
+      responses:
+        "200":
+          description: "Updated profile(s) – only when `Prefer: return=representation`."
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Profile'
+        "204":
+          description: Update applied, no body returned.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Profiles]
+      summary: Delete profile(s) matching filter
+      description: Deletes profiles matching the query-parameter filter. Manager-only.
+      operationId: profiles_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – target profile primary key."
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – target by auth user ID."
+      responses:
+        "204":
+          description: Deleted successfully.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/user_roles
+  # =========================================================================
+
+  /rest/v1/user_roles:
+    head:
+      tags: [UserRoles]
+      summary: Count user role assignments matching filter (no body returned)
+      description: >
+        Returns HTTP headers only. Use `Prefer: count=exact` to get the total
+        number of role rows matching the filter in the `Content-Range` header.
+      operationId: user_roles_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: role
+          in: query
+          schema: { type: string, enum: [manager, employee, customer] }
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/3" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [UserRoles]
+      summary: List / filter user role assignments
+      description: >
+        - **User**: own role only.
+        - **Manager**: all role rows.
+      operationId: user_roles_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – filter by user."
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [manager, employee, customer]
+          description: "`eq.{role}` – filter by role."
+      responses:
+        "200":
+          description: Array of user-role objects.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserRole'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [UserRoles]
+      summary: Assign a role to a user (manager only)
+      description: Inserts a new role assignment. Requires `manager` role.
+      operationId: user_roles_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRoleInsert'
+            example:
+              user_id: "550e8400-e29b-41d4-a716-446655440000"
+              role: "employee"
+      responses:
+        "201":
+          description: Role assigned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRole'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [UserRoles]
+      summary: Update a role assignment (manager only)
+      operationId: user_roles_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}`"
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  $ref: '#/components/schemas/AppRole'
+      responses:
+        "204":
+          description: Updated.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [UserRoles]
+      summary: Remove a role assignment (manager only)
+      operationId: user_roles_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/vehicles
+  # =========================================================================
+
+  /rest/v1/vehicles:
+    head:
+      tags: [Vehicles]
+      summary: Count vehicles matching filter (no body returned)
+      description: >
+        Returns HTTP headers only. Use `Prefer: count=exact` to retrieve the
+        total matching vehicle count in the `Content-Range` header.
+      operationId: vehicles_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: owner_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: make
+          in: query
+          schema: { type: string }
+        - name: fuel_type
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/5" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Vehicles]
+      summary: List / filter vehicles
+      description: >
+        - **Customer**: own vehicles only (`owner_id = auth.uid()`).
+        - **Employee / Manager**: all vehicles.
+      operationId: vehicles_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – single vehicle by ID."
+        - name: owner_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – filter by owner."
+        - name: registration
+          in: query
+          schema: { type: string }
+          description: "`eq.HR26BX1234` – exact registration match."
+        - name: make
+          in: query
+          schema: { type: string }
+          description: "`ilike.*swift*` – partial make search."
+        - name: fuel_type
+          in: query
+          schema: { type: string }
+          description: "`eq.Electric` – filter by fuel type."
+      responses:
+        "200":
+          description: Array of vehicle objects.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vehicle'
+              example:
+                - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  owner_id: "550e8400-e29b-41d4-a716-446655440000"
+                  make: "Maruti Suzuki"
+                  model: "Swift VXi"
+                  year: 2022
+                  registration: "HR 26 BX 1234"
+                  color: "Pearl White"
+                  mileage: 28450
+                  fuel_type: "Petrol"
+                  brand_logo_url: null
+                  created_at: "2026-04-19T01:40:54Z"
+                  updated_at: "2026-04-19T01:40:54Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Vehicles]
+      summary: Register a new vehicle
+      description: >
+        Creates a vehicle record. `owner_id` must equal `auth.uid()` unless the
+        caller has `manager` role.
+      operationId: vehicles_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleInsert'
+            example:
+              owner_id: "550e8400-e29b-41d4-a716-446655440000"
+              make: "Maruti Suzuki"
+              model: "Swift VXi"
+              year: 2022
+              registration: "HR 26 BX 1234"
+              color: "Pearl White"
+              mileage: 28450
+              fuel_type: "Petrol"
+      responses:
+        "201":
+          description: Vehicle registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vehicle'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Vehicles]
+      summary: Update vehicle(s) matching filter
+      operationId: vehicles_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}`"
+        - name: registration
+          in: query
+          schema: { type: string }
+          description: "`eq.{reg}`"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VehicleUpdate'
+            example:
+              mileage: 29000
+              color: "Midnight Black"
+      responses:
+        "200":
+          description: Updated vehicle(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vehicle'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Vehicles]
+      summary: Delete vehicle(s) matching filter
+      description: Owner or manager can delete. Cascades to bookings and service history.
+      operationId: vehicles_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: owner_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/services
+  # =========================================================================
+
+  /rest/v1/services:
+    head:
+      tags: [Services]
+      summary: Count service catalogue entries matching filter (no body returned)
+      description: Use `Prefer: count=exact` to get total count in `Content-Range` header.
+      operationId: services_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: active
+          in: query
+          schema: { type: string }
+          description: "`eq.true` – only active services."
+        - name: category
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/12" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Services]
+      summary: List / filter service catalogue
+      description: All authenticated users can read services.
+      operationId: services_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: active
+          in: query
+          schema: { type: string }
+          description: "`eq.true` – only active services."
+        - name: category
+          in: query
+          schema: { type: string }
+          description: "`eq.Maintenance` – filter by service category."
+        - name: price
+          in: query
+          schema: { type: string }
+          description: "`gte.1000` – filter by price threshold."
+      responses:
+        "200":
+          description: Array of service objects.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Service'
+              example:
+                - id: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  name: "Basic Service"
+                  category: "Maintenance"
+                  description: "Engine oil change, oil filter, multi-point inspection, top-up of all fluids"
+                  price: 2499.00
+                  duration_minutes: 90
+                  active: true
+                  created_at: "2026-04-19T01:40:54Z"
+                  updated_at: "2026-04-19T01:40:54Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Services]
+      summary: Create a service entry (manager only)
+      operationId: services_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInsert'
+            example:
+              name: "Tyre Replacement"
+              category: "Tyres"
+              description: "Single tyre swap including balancing"
+              price: 3500
+              duration_minutes: 45
+      responses:
+        "201":
+          description: Service created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Service'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Services]
+      summary: Update service(s) (manager only)
+      operationId: services_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceUpdate'
+            example:
+              price: 2699
+              active: true
+      responses:
+        "200":
+          description: Updated service(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Service'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Services]
+      summary: Delete service(s) (manager only)
+      operationId: services_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: active
+          in: query
+          schema: { type: string }
+          description: "`eq.false` – delete all inactive services."
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/inventory
+  # =========================================================================
+
+  /rest/v1/inventory:
+    head:
+      tags: [Inventory]
+      summary: Count inventory items matching filter (no body returned)
+      description: >
+        Use `Prefer: count=exact` to get total item count in `Content-Range`.
+        Accessible to employees and managers only.
+      operationId: inventory_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: quantity
+          in: query
+          schema: { type: string }
+          description: "`lte.10` – low-stock items."
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/10" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Inventory]
+      summary: List / filter inventory items
+      description: Accessible to employees and managers only (RLS enforced).
+      operationId: inventory_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: sku
+          in: query
+          schema: { type: string }
+          description: "`eq.OIL-5W30-1L` – exact SKU lookup."
+        - name: category
+          in: query
+          schema: { type: string }
+          description: "`eq.Filters`"
+        - name: quantity
+          in: query
+          schema: { type: string }
+          description: "`lte.10` – items at or below a quantity threshold (low stock)."
+      responses:
+        "200":
+          description: Array of inventory items.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InventoryItem'
+              example:
+                - id: "d1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  sku: "OIL-5W30-1L"
+                  name: "Engine Oil 5W-30 (1L)"
+                  category: "Lubricants"
+                  quantity: 84
+                  reorder_level: 20
+                  unit_price: 650.00
+                  supplier: "Castrol India"
+                  created_at: "2026-04-19T01:40:54Z"
+                  updated_at: "2026-04-19T01:40:54Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Inventory]
+      summary: Add an inventory item (manager only)
+      operationId: inventory_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryItemInsert'
+            example:
+              sku: "TYRE-195-65-R15"
+              name: "Tyre 195/65 R15"
+              category: "Tyres"
+              quantity: 8
+              reorder_level: 4
+              unit_price: 4500
+              supplier: "MRF"
+      responses:
+        "201":
+          description: Item created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventoryItem'
+        "409":
+          $ref: '#/components/responses/Conflict'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Inventory]
+      summary: Update inventory item(s)
+      description: >
+        Managers can update any field. Employees can only update `quantity`
+        (stock adjustment during a job).
+      operationId: inventory_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: sku
+          in: query
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryItemUpdate'
+            example:
+              quantity: 70
+      responses:
+        "200":
+          description: Updated item(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InventoryItem'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Inventory]
+      summary: Delete inventory item(s) (manager only)
+      operationId: inventory_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: sku
+          in: query
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/bookings
+  # =========================================================================
+
+  /rest/v1/bookings:
+    head:
+      tags: [Bookings]
+      summary: Count bookings matching filter (no body returned)
+      description: >
+        Use `Prefer: count=exact` to retrieve the total booking count matching
+        the filter in the `Content-Range` header. Useful for dashboard counters
+        (e.g., "5 bookings pending today").
+      operationId: bookings_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: status
+          in: query
+          schema: { type: string }
+          description: "`eq.pending` or `in.(pending,confirmed)` – filter by status."
+        - name: assigned_to
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: scheduled_at
+          in: query
+          schema: { type: string }
+          description: "`gte.2026-04-20` – filter by date."
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/8" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Bookings]
+      summary: List / filter bookings
+      description: >
+        RLS scoping:
+        - **Customer**: own bookings only (`customer_id = auth.uid()`).
+        - **Employee**: own assigned jobs + all bookings with select access.
+        - **Manager**: all bookings.
+      operationId: bookings_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – filter by customer."
+        - name: assigned_to
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – filter by assigned employee."
+        - name: vehicle_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: service_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string }
+          description: >
+            `eq.{status}` or `in.(pending,confirmed)`.
+            Values: `pending` `confirmed` `in_progress` `completed` `cancelled`
+            `checked_in` `ready_for_pickup` `released`.
+        - name: priority
+          in: query
+          schema: { type: string }
+          description: "`eq.express` – filter by priority."
+        - name: scheduled_at
+          in: query
+          schema: { type: string }
+          description: "`gte.2026-04-20` – filter by scheduled date."
+        - name: dropoff_code
+          in: query
+          schema: { type: string }
+          description: "`eq.DROP-ABCD1234` – lookup by drop-off code."
+        - name: pickup_code
+          in: query
+          schema: { type: string }
+          description: "`eq.PICK-EFGH5678` – lookup by pick-up code."
+      responses:
+        "200":
+          description: Array of booking objects.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Booking'
+              example:
+                - id: "b1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  customer_id: "550e8400-e29b-41d4-a716-446655440000"
+                  vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  service_id: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  assigned_to: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  scheduled_at: "2026-04-22T10:00:00Z"
+                  status: "confirmed"
+                  priority: "normal"
+                  notes: null
+                  total_cost: 2499.00
+                  dropoff_code: "DROP-A1B2C3D4"
+                  pickup_code: "PICK-E5F6G7H8"
+                  checked_in_at: null
+                  released_at: null
+                  extra_service_ids: []
+                  created_at: "2026-04-19T01:40:54Z"
+                  updated_at: "2026-04-19T01:40:54Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Bookings]
+      summary: Create a booking
+      description: >
+        Customer, employee, or manager can create. `dropoff_code` and
+        `pickup_code` are auto-generated by the `bookings_codes_trg` trigger if
+        not provided. Status defaults to `pending`.
+      operationId: bookings_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingInsert'
+            example:
+              customer_id: "550e8400-e29b-41d4-a716-446655440000"
+              vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              service_id: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+              scheduled_at: "2026-04-25T10:00:00Z"
+              priority: "normal"
+              notes: "Please check the AC as well"
+              total_cost: 2499
+      responses:
+        "201":
+          description: Booking created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Booking'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Bookings]
+      summary: Update booking(s) matching filter
+      description: >
+        Used for status transitions, assignment, cost updates, drop-off /
+        pick-up timestamps. When status is updated to `completed` or `released`,
+        the `trg_create_history_on_completion` trigger automatically inserts a
+        `service_history` record.
+      operationId: bookings_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: assigned_to
+          in: query
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingUpdate'
+            examples:
+              assign:
+                summary: Assign to employee
+                value:
+                  assigned_to: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "confirmed"
+              checkin:
+                summary: Customer check-in
+                value:
+                  status: "checked_in"
+                  checked_in_at: "2026-04-22T09:55:00Z"
+              complete:
+                summary: Mark as completed
+                value:
+                  status: "completed"
+                  total_cost: 2699
+              release:
+                summary: Vehicle released to customer
+                value:
+                  status: "released"
+                  released_at: "2026-04-22T13:30:00Z"
+      responses:
+        "200":
+          description: Updated booking(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Booking'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Bookings]
+      summary: Delete booking(s) (manager or booking owner)
+      operationId: bookings_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string }
+          description: "`eq.cancelled` – delete all cancelled bookings."
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/service_history
+  # =========================================================================
+
+  /rest/v1/service_history:
+    head:
+      tags: [ServiceHistory]
+      summary: Count service history records matching filter (no body returned)
+      description: Use `Prefer: count=exact` to get total count in `Content-Range`.
+      operationId: service_history_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: technician_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: service_date
+          in: query
+          schema: { type: string }
+          description: "`gte.2026-01-01`"
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/24" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [ServiceHistory]
+      summary: List / filter service history
+      description: >
+        - **Customer**: own records only.
+        - **Employee / Technician**: own technician records + all with read access.
+        - **Manager**: all records.
+      operationId: service_history_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: vehicle_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: technician_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: booking_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: service_date
+          in: query
+          schema: { type: string }
+          description: "`gte.2026-01-01` – records from a date onward."
+      responses:
+        "200":
+          description: Array of service history records.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceHistoryRecord'
+              example:
+                - id: "a2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  booking_id: "b1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  customer_id: "550e8400-e29b-41d4-a716-446655440000"
+                  vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  service_id: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  technician_id: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  service_date: "2026-03-05T10:00:00Z"
+                  mileage_at_service: 26100
+                  parts_used: "Engine oil 5W-30, Oil filter"
+                  notes: "Routine maintenance complete. All systems normal."
+                  cost: 2499.00
+                  created_at: "2026-03-05T10:00:00Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [ServiceHistory]
+      summary: Manually create a service history record (staff only)
+      description: >
+        Records are also inserted automatically by the
+        `trg_create_history_on_completion` trigger when a booking reaches
+        `completed` or `released` status.
+      operationId: service_history_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceHistoryInsert'
+            example:
+              customer_id: "550e8400-e29b-41d4-a716-446655440000"
+              vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              service_id: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+              technician_id: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              service_date: "2026-04-20T11:00:00Z"
+              mileage_at_service: 28500
+              parts_used: "Engine oil 5W-30, Oil filter"
+              notes: "Routine maintenance complete."
+              cost: 2499
+      responses:
+        "201":
+          description: Record created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceHistoryRecord'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [ServiceHistory]
+      summary: Update a service history record (manager only)
+      operationId: service_history_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceHistoryUpdate'
+            example:
+              notes: "Correction: also replaced coolant"
+              parts_used: "Engine oil 5W-30, Oil filter, Coolant 1L"
+              cost: 2779
+      responses:
+        "200":
+          description: Updated record(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceHistoryRecord'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [ServiceHistory]
+      summary: Delete service history record(s) (manager only)
+      operationId: service_history_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: booking_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/notifications
+  # =========================================================================
+
+  /rest/v1/notifications:
+    head:
+      tags: [Notifications]
+      summary: Count notifications matching filter (no body returned)
+      description: >
+        Use `Prefer: count=exact` to get the unread notification count in
+        `Content-Range`. Most useful with `?read=eq.false` to drive the
+        notification badge counter.
+      operationId: notifications_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: read
+          in: query
+          schema: { type: string }
+          description: "`eq.false` – unread count only."
+        - name: type
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/3" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [Notifications]
+      summary: List / filter notifications for the authenticated user
+      description: Users can only see their own notifications (RLS enforced).
+      operationId: notifications_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – redundant under RLS but explicit filter for SDK queries."
+        - name: read
+          in: query
+          schema: { type: string }
+          description: "`eq.false` – unread notifications only."
+        - name: type
+          in: query
+          schema: { type: string }
+          description: "`eq.warning` – filter by notification type."
+      responses:
+        "200":
+          description: Array of notification objects.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+              example:
+                - id: "e1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  user_id: "550e8400-e29b-41d4-a716-446655440000"
+                  title: "Booking Confirmed"
+                  message: "Your Swift service is confirmed for tomorrow at 10:00 AM."
+                  type: "success"
+                  read: false
+                  created_at: "2026-04-19T01:40:54Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Notifications]
+      summary: Create a notification
+      description: >
+        A notification can only target the authenticated user or, for staff
+        (managers/employees), any user.
+      operationId: notifications_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationInsert'
+            example:
+              user_id: "550e8400-e29b-41d4-a716-446655440000"
+              title: "Service Ready"
+              message: "Your XUV700 is ready for pickup."
+              type: "success"
+      responses:
+        "201":
+          description: Notification created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Notifications]
+      summary: Update notification(s) – e.g., mark as read
+      operationId: notifications_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: read
+          in: query
+          schema: { type: string }
+          description: "`eq.false` – mark all unread as read."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationUpdate'
+            example:
+              read: true
+      responses:
+        "200":
+          description: Updated notification(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Notifications]
+      summary: Delete notification(s) (own user only)
+      operationId: notifications_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: read
+          in: query
+          schema: { type: string }
+          description: "`eq.true` – delete all read notifications."
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # POSTGREST – /rest/v1/service_reminders
+  # =========================================================================
+
+  /rest/v1/service_reminders:
+    head:
+      tags: [ServiceReminders]
+      summary: Count service reminders matching filter (no body returned)
+      description: >
+        Use `Prefer: count=exact` to get the total reminder count in `Content-Range`.
+        Most useful with `?acknowledged=eq.false` to count pending reminders.
+      operationId: service_reminders_head
+      parameters:
+        - $ref: '#/components/parameters/PreferCount'
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: vehicle_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: acknowledged
+          in: query
+          schema: { type: string }
+          description: "`eq.false` – pending reminders only."
+        - name: due_date
+          in: query
+          schema: { type: string }
+          description: "`lte.2026-05-01` – due on or before a date."
+      responses:
+        "200":
+          description: Headers only.
+          headers:
+            Content-Range:
+              schema: { type: string, example: "0-0/2" }
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      tags: [ServiceReminders]
+      summary: List / filter service reminders
+      description: >
+        - **Customer**: own reminders.
+        - **Employee / Manager**: all reminders.
+      operationId: service_reminders_list
+      parameters:
+        - $ref: '#/components/parameters/SelectParam'
+        - $ref: '#/components/parameters/OrderParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/OffsetParam'
+        - $ref: '#/components/parameters/PreferCount'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: vehicle_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: acknowledged
+          in: query
+          schema: { type: string }
+          description: "`eq.false` – pending reminders only."
+        - name: due_date
+          in: query
+          schema: { type: string }
+          description: "`lte.2026-05-01` – reminders due on or before a date."
+      responses:
+        "200":
+          description: Array of service reminders.
+          headers:
+            Content-Range:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceReminder'
+              example:
+                - id: "f1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  customer_id: "550e8400-e29b-41d4-a716-446655440000"
+                  vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  title: "Engine Oil Change Due"
+                  message: "Your Swift VXi is due for an oil change (target: 30,000 km)."
+                  due_date: "2026-05-15"
+                  acknowledged: false
+                  created_at: "2026-04-19T01:40:54Z"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [ServiceReminders]
+      summary: Create a service reminder
+      operationId: service_reminders_create
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceReminderInsert'
+            example:
+              customer_id: "550e8400-e29b-41d4-a716-446655440000"
+              vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              title: "Engine Oil Change Due"
+              message: "Your Swift VXi is due for an oil change at 30,000 km."
+              due_date: "2026-05-15"
+      responses:
+        "201":
+          description: Reminder created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceReminder'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [ServiceReminders]
+      summary: Update a service reminder – e.g., acknowledge
+      operationId: service_reminders_update
+      parameters:
+        - $ref: '#/components/parameters/PreferReturn'
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceReminderUpdate'
+            example:
+              acknowledged: true
+      responses:
+        "200":
+          description: Updated reminder(s).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceReminder'
+        "204":
+          description: Updated, no body.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [ServiceReminders]
+      summary: Delete service reminder(s)
+      description: >
+        Customers can delete their own reminders. Managers can delete any reminder.
+        Filter by `id` to delete a single reminder, or by `customer_id` + `vehicle_id`
+        to bulk-delete all reminders for a specific vehicle, or by `acknowledged=eq.true`
+        to clear all acknowledged reminders.
+      operationId: service_reminders_delete
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – delete a single reminder by primary key."
+        - name: customer_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – delete all reminders for a customer."
+        - name: vehicle_id
+          in: query
+          schema: { type: string, format: uuid }
+          description: "`eq.{uuid}` – delete all reminders for a specific vehicle."
+        - name: acknowledged
+          in: query
+          schema: { type: string }
+          description: "`eq.true` – delete all acknowledged reminders."
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+
+  # =========================================================================
+  # RPC – /rest/v1/rpc/
+  # =========================================================================
+
+  /rest/v1/rpc/get_user_role:
+    post:
+      tags: [RPC]
+      summary: Get highest-priority role for a user
+      description: >
+        Returns the dominant role of the supplied `_user_id`.
+        Role precedence: `manager` > `employee` > `customer`.
+        This is a `SECURITY DEFINER` function – bypasses RLS.
+      operationId: rpc_get_user_role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [_user_id]
+              properties:
+                _user_id:
+                  type: string
+                  format: uuid
+                  description: The UUID of the user to query.
+            example:
+              _user_id: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        "200":
+          description: The user's primary role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppRole'
+              example: "customer"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /rest/v1/rpc/has_role:
+    post:
+      tags: [RPC]
+      summary: Check whether a user has a specific role
+      description: >
+        Returns `true` if the user has the given role assignment, `false`
+        otherwise. `SECURITY DEFINER` – bypasses RLS to avoid recursion in
+        policy evaluation.
+      operationId: rpc_has_role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [_user_id, _role]
+              properties:
+                _user_id:
+                  type: string
+                  format: uuid
+                _role:
+                  $ref: '#/components/schemas/AppRole'
+            example:
+              _user_id: "550e8400-e29b-41d4-a716-446655440000"
+              _role: "manager"
+      responses:
+        "200":
+          description: Boolean indicating whether the user holds the role.
+          content:
+            application/json:
+              schema:
+                type: boolean
+              example: false
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # =========================================================================
+  # EDGE FUNCTIONS – /functions/v1/
+  # =========================================================================
+
+  /functions/v1/admin-create-employee:
+    options:
+      tags: [EdgeFunctions]
+      summary: CORS preflight for admin-create-employee
+      operationId: admin_create_employee_options
+      security: []
+      responses:
+        "200":
+          description: CORS headers returned.
+          headers:
+            Access-Control-Allow-Origin:
+              schema: { type: string, example: "*" }
+            Access-Control-Allow-Headers:
+              schema: { type: string }
+        "405":
+          description: Method Not Allowed.
+    post:
+      tags: [EdgeFunctions]
+      summary: Create a new employee or manager account
+      description: >
+        **Requires `manager` role.** Creates a new Supabase Auth user with
+        `email_confirm: true`, upserts their `profiles` row, and assigns the
+        specified role (`employee` by default, `manager` if explicitly set).
+
+        Checks for duplicate email before creation to prevent conflicts.
+      operationId: admin_create_employee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminCreateEmployeeRequest'
+            example:
+              email: "rohan.sharma@autoserve.in"
+              password: "Workshop@2026"
+              full_name: "Rohan Sharma"
+              phone: "+91 98100 22222"
+              role: "employee"
+      responses:
+        "200":
+          description: Account created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminCreateEmployeeResponse'
+              example:
+                success: true
+                user_id: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        "400":
+          description: Validation error – missing required fields or password too short.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              examples:
+                missingFields:
+                  summary: Missing required fields
+                  value:
+                    error: "email, password and full_name are required"
+                weakPassword:
+                  summary: Password too short
+                  value:
+                    error: "Password must be at least 6 characters"
+        "401":
+          description: Missing or invalid Authorization header.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "Unauthorized"
+        "403":
+          description: Caller does not have `manager` role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "Only managers can create staff accounts"
+        "409":
+          description: An account with that email already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "An account with this email already exists"
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /functions/v1/ai-diagnostics:
+    options:
+      tags: [EdgeFunctions]
+      summary: CORS preflight for ai-diagnostics
+      operationId: ai_diagnostics_options
+      security: []
+      responses:
+        "200":
+          description: CORS headers returned.
+        "405":
+          description: Method Not Allowed.
+    post:
+      tags: [EdgeFunctions]
+      summary: AI vehicle diagnostics (symptom analysis) or freeform AI chat
+      description: >
+        Supports two modes determined by the request body:
+
+        **Diagnostics mode** (default): Provide `symptoms` (and optionally
+        `vehicle`) to get an AI-powered analysis including probable causes,
+        severity rating, recommended services from the live catalogue, and
+        plain-English advice.
+
+        **Chat mode**: Set `mode: "chat"` and provide `history` (a
+        conversation array) plus optional `context` (customer/vehicle data)
+        for a general automotive assistant conversation.
+
+        Powered by `google/gemini-2.5-flash` via the Lovable AI Gateway.
+      operationId: ai_diagnostics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/AIDiagnosticsRequest'
+                - $ref: '#/components/schemas/AIChatRequest'
+
+            examples:
+              diagnostics:
+                summary: Symptom-based diagnostics
+                value:
+                  symptoms: "Engine makes knocking noise when accelerating, fuel consumption increased"
+                  vehicle:
+                    make: "Maruti Suzuki"
+                    model: "Swift VXi"
+                    year: 2022
+                    mileage: 28450
+                    fuel_type: "Petrol"
+              chat:
+                summary: Freeform AI chat
+                value:
+                  mode: "chat"
+                  context:
+                    vehicles:
+                      - make: "Maruti Suzuki"
+                        model: "Swift VXi"
+                        year: 2022
+                  history:
+                    - role: "user"
+                      content: "What services does my Swift need at 30,000 km?"
+      responses:
+        "200":
+          description: AI analysis or chat reply.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/AIDiagnosticsResponse'
+                  - $ref: '#/components/schemas/AIChatResponse'
+              examples:
+                diagnostics:
+                  summary: Diagnostics response
+                  value:
+                    probable_causes:
+                      - "Low engine oil or degraded oil viscosity"
+                      - "Worn spark plugs causing misfires"
+                      - "Carbon build-up in combustion chamber"
+                    severity: "medium"
+                    recommended_service_names:
+                      - "Basic Service"
+                      - "Engine Tuning"
+                    recommended_service_ids:
+                      - "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                      - "e2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                    advice: "We recommend scheduling a Basic Service soon to address the oil condition. An Engine Tuning session will help reset idle parameters and remove carbon build-up. Avoid high-rev driving until the service is complete."
+                chat:
+                  summary: Chat response
+                  value:
+                    reply: "At 30,000 km, your Swift VXi is due for a Standard Service (₹4,499) which includes air filter, brake cleaning and a wheel rotation on top of the usual oil change. Would you like me to open the booking page?"
+        "400":
+          description: Missing required field (`symptoms` or `history`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              examples:
+                noSymptoms:
+                  value: { error: "symptoms required" }
+                noHistory:
+                  value: { error: "history required" }
+        "402":
+          description: AI credits exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "AI credits exhausted" }
+        "429":
+          description: Rate limited by AI gateway.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "Rate limited" }
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /functions/v1/ai-maintenance-tips:
+    options:
+      tags: [EdgeFunctions]
+      summary: CORS preflight for ai-maintenance-tips
+      operationId: ai_maintenance_tips_options
+      security: []
+      responses:
+        "200":
+          description: CORS headers returned.
+        "405":
+          description: Method Not Allowed.
+    post:
+      tags: [EdgeFunctions]
+      summary: AI maintenance tips and next-service recommendations for a vehicle
+      description: >
+        Accepts either a `vehicle_id` (server looks up DB record + service history)
+        **or** inline vehicle attributes (`make`, `model`, `year`, `mileage`,
+        `fuel_type`). Returns 3 actionable maintenance tips tailored to the
+        vehicle's age, mileage, and fuel type, plus 1–3 recommended services
+        from the live catalogue.
+
+        Powered by `google/gemini-2.5-flash` via the Lovable AI Gateway.
+      operationId: ai_maintenance_tips
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIMaintenanceTipsRequest'
+            examples:
+              byId:
+                summary: Lookup by vehicle_id (server resolves history)
+                value:
+                  vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              inline:
+                summary: Inline vehicle attributes
+                value:
+                  make: "Tata"
+                  model: "Nexon EV"
+                  year: 2023
+                  mileage: 14200
+                  fuel_type: "Electric"
+      responses:
+        "200":
+          description: Maintenance tips and service recommendations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIMaintenanceTipsResponse'
+              example:
+                tips:
+                  - "Check tyre pressure monthly – EV torque causes faster wear."
+                  - "Schedule a battery health check at every 15,000 km."
+                  - "Clean brake dust from regenerative braking every 10,000 km."
+                recommended_service_names:
+                  - "Diagnostic Scan"
+                  - "Wheel Alignment & Balancing"
+                recommended_service_ids:
+                  - "c2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  - "d2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        "400":
+          description: Insufficient vehicle information provided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "Provide either vehicle_id or {make, model, year}"
+        "404":
+          description: Vehicle not found for the supplied `vehicle_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "Vehicle not found"
+        "402":
+          description: AI credits exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "AI credits exhausted" }
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "Rate limited" }
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /functions/v1/ai-resale-valuation:
+    options:
+      tags: [EdgeFunctions]
+      summary: CORS preflight for ai-resale-valuation
+      operationId: ai_resale_valuation_options
+      security: []
+      responses:
+        "200":
+          description: CORS headers returned.
+        "405":
+          description: Method Not Allowed.
+    post:
+      tags: [EdgeFunctions]
+      summary: AI-powered vehicle resale valuation (Indian used-car market)
+      description: >
+        Estimates the current resale value of a vehicle in the Indian used-car
+        market (calibrated to Gurugram/NCR – CarDekho, OLX, Cars24 averages).
+
+        Returns an estimated value with a low–high range, depreciation percentage,
+        key influencing factors, and a plain-English narrative.
+
+        Powered by `google/gemini-2.5-flash` via the Lovable AI Gateway.
+      operationId: ai_resale_valuation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIResaleValuationRequest'
+            example:
+              make: "Maruti Suzuki"
+              model: "Swift VXi"
+              year: 2022
+              mileage: 28450
+              fuel_type: "Petrol"
+              condition: "Good"
+      responses:
+        "200":
+          description: Resale valuation result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIResaleValuationResponse'
+              example:
+                estimated_value_inr: 680000
+                low_inr: 620000
+                high_inr: 740000
+                depreciation_pct: 32
+                factors:
+                  - "Low mileage for a 2022 model boosts value"
+                  - "Petrol variant has steady demand in NCR"
+                  - "Overall good condition with no accident history"
+                narrative: "The 2022 Swift VXi in good condition with ~28,000 km is well-positioned in the ₹6.2–7.4 lakh range on platforms like Cars24 and OLX. The relatively low mileage and petrol fuel type contribute positively to its resale value."
+        "400":
+          description: Missing required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "make, model, year required"
+        "402":
+          description: AI credits exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "AI credits exhausted" }
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "Rate limited" }
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /functions/v1/ai-vehicle-summary:
+    options:
+      tags: [EdgeFunctions]
+      summary: CORS preflight for ai-vehicle-summary
+      operationId: ai_vehicle_summary_options
+      security: []
+      responses:
+        "200":
+          description: CORS headers returned.
+        "405":
+          description: Method Not Allowed.
+    post:
+      tags: [EdgeFunctions]
+      summary: AI maintenance summary for a vehicle (technician brief)
+      description: >
+        Generates a concise 4–6 line AI-written maintenance brief for the
+        technician about to work on a vehicle. Looks up the vehicle record and
+        up to 20 most-recent service history entries from the database.
+
+        Used on the Employee **Job Detail** page to help technicians quickly
+        understand a vehicle's history before starting work.
+
+        Powered by `google/gemini-2.5-flash` via the Lovable AI Gateway.
+      operationId: ai_vehicle_summary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vehicle_id]
+              properties:
+                vehicle_id:
+                  type: string
+                  format: uuid
+                  description: The UUID of the vehicle to summarise.
+            example:
+              vehicle_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      responses:
+        "200":
+          description: AI-generated technician brief.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIVehicleSummaryResponse'
+              example:
+                summary: >
+                  The 2022 Maruti Suzuki Swift VXi (HR 26 BX 1234) is in good overall condition with
+                  28,450 km on the clock. It received a Basic Service 45 days ago (at 26,100 km) which
+                  covered the oil, filter and fluid top-ups. Front brake pads were replaced at 22,300 km
+                  approximately 4 months ago; rear brakes and discs have not been inspected since. Today
+                  I would prioritise a thorough inspection of the air filter and cabin filter, both likely
+                  overdue given the mileage gap since the last Standard Service. No recurring issues on
+                  record.
+        "400":
+          description: Missing `vehicle_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "vehicle_id required"
+        "404":
+          description: Vehicle not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example:
+                error: "Vehicle not found"
+        "402":
+          description: AI credits exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "AI credits exhausted" }
+        "429":
+          description: Rate limited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdgeFunctionError'
+              example: { error: "Rate limited, please retry shortly" }
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  /functions/v1/seed-demo-accounts:
+    options:
+      tags: [EdgeFunctions]
+      summary: CORS preflight for seed-demo-accounts
+      operationId: seed_demo_accounts_options
+      security: []
+      responses:
+        "200":
+          description: CORS headers returned.
+        "405":
+          description: Method Not Allowed.
+    post:
+      tags: [EdgeFunctions]
+      summary: Seed / reset demo accounts and sample data
+      description: >
+        **⚠ Destructive – for development / demo environments only.**
+
+        Performs the following operations in order:
+
+        1. Removes legacy demo accounts.
+        2. Upserts three demo accounts: `manager@autoserve.in`, `employee@autoserve.in`,
+           `customer@autoserve.in` (all with password `autoserve@123`).
+        3. Resets and re-seeds the services catalogue (12 services) and inventory
+           (10 items) with realistic Indian NCR pricing.
+        4. Creates 3 demo vehicles, 4 bookings, and 4 service history records for
+           the customer account.
+        5. Seeds notifications for all three users.
+      operationId: seed_demo_accounts
+      responses:
+        "200":
+          description: Seed completed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeedDemoAccountsResponse'
+              example:
+                success: true
+                accounts:
+                  - email: "manager@autoserve.in"
+                    role: "manager"
+                  - email: "employee@autoserve.in"
+                    role: "employee"
+                  - email: "customer@autoserve.in"
+                    role: "customer"
+                ids:
+                  manager: "b2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+                  employee: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  customer: "550e8400-e29b-41d4-a716-446655440000"
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          description: Seed failed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: false
+                  error:
+                    type: string
+                    example: "Error: duplicate key value violates unique constraint"
+
+# ===========================================================================
+# COMPONENTS
+# ===========================================================================
+components:
+
+  # -------------------------------------------------------------------------
+  # Security Schemes
+  # -------------------------------------------------------------------------
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Supabase JWT access token obtained from `/auth/v1/token`.
+        Include as `Authorization: Bearer <token>`.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: apikey
+      description: >
+        Supabase project anonymous key (`SUPABASE_ANON_KEY`).
+        Required on **every** request to identify the Supabase project.
+
+  # -------------------------------------------------------------------------
+  # Reusable Parameters
+  # -------------------------------------------------------------------------
+  parameters:
+    SelectParam:
+      name: select
+      in: query
+      description: >
+        Comma-separated list of columns to return.
+        Supports nested relations, e.g. `select=*,vehicles(*)`.
+        Defaults to `*` (all columns).
+      schema:
+        type: string
+        example: "id,customer_id,status,scheduled_at"
+
+    OrderParam:
+      name: order
+      in: query
+      description: >
+        Sort column and direction. Format: `column.asc` or `column.desc`.
+        Multiple columns: `created_at.desc,id.asc`.
+      schema:
+        type: string
+        example: "created_at.desc"
+
+    LimitParam:
+      name: limit
+      in: query
+      description: "Maximum number of rows to return (default: no limit for most clients; use SDK `.limit()`)."
+      schema:
+        type: integer
+        minimum: 1
+        example: 20
+
+    OffsetParam:
+      name: offset
+      in: query
+      description: Number of rows to skip (for pagination).
+      schema:
+        type: integer
+        minimum: 0
+        example: 0
+
+    PreferReturn:
+      name: Prefer
+      in: header
+      description: >
+        PostgREST preference header.
+        - `return=representation` – include the modified row(s) in the response body.
+        - `return=minimal` – return no body (faster, default for mutating ops).
+        - `return=headers-only` – return only headers.
+      schema:
+        type: string
+        enum:
+          - "return=representation"
+          - "return=minimal"
+          - "return=headers-only"
+      example: "return=representation"
+
+    PreferCount:
+      name: Prefer
+      in: header
+      description: >
+        PostgREST count preference header for GET requests.
+        - `count=exact` – return the precise total row count in the `Content-Range` header (requires a `COUNT(*)` query; may be slow on large tables).
+        - `count=planned` – return the Postgres planner estimate (fast, may be approximate).
+        - `count=estimated` – use exact for small result sets, planner estimate for large ones.
+
+        The response includes a `Content-Range` header in the format `0-{last}/{total}`, e.g. `Content-Range: 0-19/200`.
+      schema:
+        type: string
+        enum:
+          - "count=exact"
+          - "count=planned"
+          - "count=estimated"
+      example: "count=exact"
+
+  # -------------------------------------------------------------------------
+  # Reusable Responses
+  # -------------------------------------------------------------------------
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired JWT / API key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PostgRESTError'
+          example:
+            code: "PGRST301"
+            details: null
+            hint: null
+            message: "JWT expired"
+
+    Forbidden:
+      description: Authenticated but RLS policy denied the operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PostgRESTError'
+          example:
+            code: "42501"
+            details: null
+            hint: null
+            message: "new row violates row-level security policy for table \"bookings\""
+
+    Conflict:
+      description: Unique constraint violation (duplicate key).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PostgRESTError'
+          example:
+            code: "23505"
+            details: "Key (registration)=(HR 26 BX 1234) already exists."
+            hint: null
+            message: "duplicate key value violates unique constraint \"vehicles_registration_key\""
+
+    UnprocessableEntity:
+      description: >
+        Schema validation failure – a required field is missing, a value is
+        the wrong type, or a foreign-key / check-constraint is violated.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PostgRESTError'
+          examples:
+            missingRequired:
+              summary: Required field missing
+              value:
+                code: "23502"
+                details: "Failing row contains (null, null, ...)."
+                hint: null
+                message: "null value in column \"customer_id\" violates not-null constraint"
+            invalidEnum:
+              summary: Invalid enum value
+              value:
+                code: "22P02"
+                details: null
+                hint: null
+                message: "invalid input value for enum booking_status: \"draft\""
+            foreignKeyViolation:
+              summary: Foreign key not found
+              value:
+                code: "23503"
+                details: "Key (vehicle_id)=(...) is not present in table \"vehicles\"."
+                hint: null
+                message: "insert or update on table \"bookings\" violates foreign key constraint"
+
+    InternalServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EdgeFunctionError'
+          example:
+            error: "Internal server error"
+
+  # -------------------------------------------------------------------------
+  # Schemas
+  # -------------------------------------------------------------------------
+  schemas:
+
+    # ---- Enums ----
+
+    AppRole:
+      type: string
+      enum: [manager, employee, customer]
+      description: User role within the AutoServe platform.
+      example: customer
+
+    BookingStatus:
+      type: string
+      enum:
+        - pending
+        - confirmed
+        - in_progress
+        - completed
+        - cancelled
+        - checked_in
+        - ready_for_pickup
+        - released
+      description: >
+        Lifecycle state of a booking:
+        `pending` → `confirmed` → `checked_in` → `in_progress` → `completed` / `released`
+        (or `cancelled` at any stage).
+      example: confirmed
+
+    BookingPriority:
+      type: string
+      enum: [normal, express, priority]
+      description: Service priority level.
+      example: normal
+
+    # ---- Auth ----
+
+    SignUpRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "aarav.kapoor@example.in"
+        password:
+          type: string
+          format: password
+          minLength: 6
+          example: "Secure@123"
+        data:
+          type: object
+          description: Arbitrary user metadata stored in `auth.users.raw_user_meta_data`.
+          properties:
+            full_name:
+              type: string
+              example: "Aarav Kapoor"
+            phone:
+              type: string
+              example: "+91 98100 33333"
+            role:
+              $ref: '#/components/schemas/AppRole'
+          additionalProperties: true
+
+    PasswordSignInRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "manager@autoserve.in"
+        password:
+          type: string
+          format: password
+          example: "autoserve@123"
+
+    RefreshTokenRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: The refresh token obtained from a previous sign-in response.
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 6
+        phone:
+          type: string
+        data:
+          type: object
+          description: User metadata to merge (partial update).
+          additionalProperties: true
+
+    AuthUser:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        email:
+          type: string
+          format: email
+          example: "aarav.kapoor@example.in"
+        phone:
+          type: string
+          nullable: true
+          example: "+91 98100 33333"
+        role:
+          type: string
+          example: "authenticated"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_sign_in_at:
+          type: string
+          format: date-time
+          nullable: true
+        email_confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+        user_metadata:
+          type: object
+          description: Data from `raw_user_meta_data`.
+          properties:
+            full_name:
+              type: string
+            phone:
+              type: string
+            role:
+              $ref: '#/components/schemas/AppRole'
+          additionalProperties: true
+        app_metadata:
+          type: object
+          additionalProperties: true
+        aud:
+          type: string
+          example: "authenticated"
+
+    AuthSession:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: Short-lived JWT (valid for 3600 seconds by default).
+        token_type:
+          type: string
+          example: "bearer"
+        expires_in:
+          type: integer
+          example: 3600
+        expires_at:
+          type: integer
+          description: Unix epoch timestamp when the token expires.
+          example: 1745200000
+        refresh_token:
+          type: string
+          description: Long-lived refresh token used to obtain new access tokens.
+        user:
+          $ref: '#/components/schemas/AuthUser'
+
+    AuthError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "invalid_grant"
+        error_description:
+          type: string
+          example: "Invalid login credentials"
+        error_code:
+          type: string
+          example: "invalid_credentials"
+        status_code:
+          type: integer
+          example: 400
+
+    # ---- PostgREST Error ----
+
+    PostgRESTError:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Postgres error code or PostgREST internal code.
+          example: "42501"
+        details:
+          type: string
+          nullable: true
+        hint:
+          type: string
+          nullable: true
+        message:
+          type: string
+          example: "new row violates row-level security policy"
+
+    # ---- Edge Function Error ----
+
+    EdgeFunctionError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: "vehicle_id required"
+
+    # ---- Profile ----
+
+    Profile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Profile primary key.
+          example: "a1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        user_id:
+          type: string
+          format: uuid
+          description: References `auth.users.id`. Unique.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        full_name:
+          type: string
+          example: "Aarav Kapoor"
+        phone:
+          type: string
+          nullable: true
+          example: "+91 98100 33333"
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://cdn.autoserve.in/avatars/aarav.jpg"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    ProfileInsert:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+          default: ""
+        phone:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+
+    ProfileUpdate:
+      type: object
+      properties:
+        full_name:
+          type: string
+        phone:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+
+    # ---- UserRole ----
+
+    UserRole:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "b1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        user_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        role:
+          $ref: '#/components/schemas/AppRole'
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    UserRoleInsert:
+      type: object
+      required: [user_id, role]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/AppRole'
+
+    # ---- Vehicle ----
+
+    Vehicle:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        owner_id:
+          type: string
+          format: uuid
+          description: References `auth.users.id`.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        make:
+          type: string
+          example: "Maruti Suzuki"
+        model:
+          type: string
+          example: "Swift VXi"
+        year:
+          type: integer
+          example: 2022
+        registration:
+          type: string
+          description: Unique vehicle registration number.
+          example: "HR 26 BX 1234"
+        color:
+          type: string
+          nullable: true
+          example: "Pearl White"
+        mileage:
+          type: integer
+          description: Current odometer reading in kilometres.
+          example: 28450
+        fuel_type:
+          type: string
+          nullable: true
+          description: "e.g., Petrol, Diesel, Electric, CNG, Hybrid."
+          example: "Petrol"
+        brand_logo_url:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://cdn.autoserve.in/logos/maruti.png"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    VehicleInsert:
+      type: object
+      required: [owner_id, make, model, year, registration]
+      properties:
+        owner_id:
+          type: string
+          format: uuid
+        make:
+          type: string
+        model:
+          type: string
+        year:
+          type: integer
+          minimum: 1900
+          maximum: 2100
+        registration:
+          type: string
+        color:
+          type: string
+          nullable: true
+        mileage:
+          type: integer
+          default: 0
+        fuel_type:
+          type: string
+          default: "Petrol"
+        brand_logo_url:
+          type: string
+          format: uri
+          nullable: true
+
+    VehicleUpdate:
+      type: object
+      properties:
+        make:
+          type: string
+        model:
+          type: string
+        year:
+          type: integer
+        registration:
+          type: string
+        color:
+          type: string
+          nullable: true
+        mileage:
+          type: integer
+        fuel_type:
+          type: string
+        brand_logo_url:
+          type: string
+          format: uri
+          nullable: true
+
+    # ---- Service ----
+
+    Service:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        name:
+          type: string
+          example: "Basic Service"
+        category:
+          type: string
+          description: "e.g., Maintenance, Brakes, AC, Tyres, Electrical, Diagnostics, Cleaning, Repair, Engine."
+          example: "Maintenance"
+        description:
+          type: string
+          nullable: true
+          example: "Engine oil change, oil filter, multi-point inspection, top-up of all fluids"
+        price:
+          type: number
+          format: double
+          description: Price in Indian Rupees (INR).
+          example: 2499.00
+        duration_minutes:
+          type: integer
+          description: Estimated service duration in minutes.
+          example: 90
+        active:
+          type: boolean
+          description: Whether the service is currently offered.
+          example: true
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    ServiceInsert:
+      type: object
+      required: [name, category, price]
+      properties:
+        name:
+          type: string
+        category:
+          type: string
+        description:
+          type: string
+          nullable: true
+        price:
+          type: number
+          format: double
+        duration_minutes:
+          type: integer
+          default: 60
+        active:
+          type: boolean
+          default: true
+
+    ServiceUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        category:
+          type: string
+        description:
+          type: string
+          nullable: true
+        price:
+          type: number
+          format: double
+        duration_minutes:
+          type: integer
+        active:
+          type: boolean
+
+    # ---- Inventory ----
+
+    InventoryItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "d1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        sku:
+          type: string
+          description: Unique Stock Keeping Unit identifier.
+          example: "OIL-5W30-1L"
+        name:
+          type: string
+          example: "Engine Oil 5W-30 (1L)"
+        category:
+          type: string
+          example: "Lubricants"
+        quantity:
+          type: integer
+          description: Current stock count.
+          example: 84
+        reorder_level:
+          type: integer
+          description: Minimum quantity before a reorder alert is triggered.
+          example: 20
+        unit_price:
+          type: number
+          format: double
+          description: Cost per unit in INR.
+          example: 650.00
+        supplier:
+          type: string
+          nullable: true
+          example: "Castrol India"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    InventoryItemInsert:
+      type: object
+      required: [sku, name, category]
+      properties:
+        sku:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        quantity:
+          type: integer
+          default: 0
+        reorder_level:
+          type: integer
+          default: 10
+        unit_price:
+          type: number
+          format: double
+          default: 0
+        supplier:
+          type: string
+          nullable: true
+
+    InventoryItemUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        category:
+          type: string
+        quantity:
+          type: integer
+        reorder_level:
+          type: integer
+        unit_price:
+          type: number
+          format: double
+        supplier:
+          type: string
+          nullable: true
+
+    # ---- Booking ----
+
+    Booking:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "b1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        customer_id:
+          type: string
+          format: uuid
+          description: References `auth.users.id`.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        vehicle_id:
+          type: string
+          format: uuid
+          description: References `vehicles.id`.
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        service_id:
+          type: string
+          format: uuid
+          description: Primary service. References `services.id`.
+          example: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        assigned_to:
+          type: string
+          format: uuid
+          nullable: true
+          description: Employee assigned to this job. References `auth.users.id`.
+          example: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        scheduled_at:
+          type: string
+          format: date-time
+          example: "2026-04-22T10:00:00Z"
+        status:
+          $ref: '#/components/schemas/BookingStatus'
+        priority:
+          $ref: '#/components/schemas/BookingPriority'
+        notes:
+          type: string
+          nullable: true
+          example: "Please check the AC as well"
+        total_cost:
+          type: number
+          format: double
+          nullable: true
+          description: Final cost in INR (may be updated after service completion).
+          example: 2499.00
+        dropoff_code:
+          type: string
+          nullable: true
+          description: >
+            Auto-generated 12-char code (format: `DROP-XXXXXXXX`) used to verify
+            vehicle drop-off. Generated by `bookings_codes_trg` trigger on INSERT.
+          example: "DROP-A1B2C3D4"
+        pickup_code:
+          type: string
+          nullable: true
+          description: >
+            Auto-generated 12-char code (format: `PICK-XXXXXXXX`) used to verify
+            vehicle pickup. Generated by `bookings_codes_trg` trigger on INSERT.
+          example: "PICK-E5F6G7H8"
+        checked_in_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp when the customer dropped off the vehicle.
+          example: null
+        released_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp when the vehicle was returned to the customer.
+          example: null
+        extra_service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Additional services added during the booking (UUIDs referencing `services.id`).
+          example: []
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    BookingInsert:
+      type: object
+      required: [customer_id, vehicle_id, service_id, scheduled_at]
+      properties:
+        customer_id:
+          type: string
+          format: uuid
+        vehicle_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        assigned_to:
+          type: string
+          format: uuid
+          nullable: true
+        scheduled_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/BookingStatus'
+        priority:
+          $ref: '#/components/schemas/BookingPriority'
+        notes:
+          type: string
+          nullable: true
+        total_cost:
+          type: number
+          format: double
+          nullable: true
+        extra_service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          default: []
+
+    BookingUpdate:
+      type: object
+      properties:
+        assigned_to:
+          type: string
+          format: uuid
+          nullable: true
+        scheduled_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/BookingStatus'
+        priority:
+          $ref: '#/components/schemas/BookingPriority'
+        notes:
+          type: string
+          nullable: true
+        total_cost:
+          type: number
+          format: double
+          nullable: true
+        checked_in_at:
+          type: string
+          format: date-time
+          nullable: true
+        released_at:
+          type: string
+          format: date-time
+          nullable: true
+        extra_service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    # ---- Service History ----
+
+    ServiceHistoryRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        booking_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: References `bookings.id`. Null for manually entered history.
+          example: "b1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        customer_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        vehicle_id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        service_id:
+          type: string
+          format: uuid
+          example: "c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        technician_id:
+          type: string
+          format: uuid
+          nullable: true
+          example: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        service_date:
+          type: string
+          format: date-time
+          example: "2026-03-05T10:00:00Z"
+        mileage_at_service:
+          type: integer
+          nullable: true
+          description: Odometer reading at the time of service.
+          example: 26100
+        parts_used:
+          type: string
+          nullable: true
+          example: "Engine oil 5W-30, Oil filter"
+        notes:
+          type: string
+          nullable: true
+          example: "Routine maintenance complete. All systems normal."
+        cost:
+          type: number
+          format: double
+          description: Total cost of this service record in INR.
+          example: 2499.00
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-03-05T10:00:00Z"
+
+    ServiceHistoryInsert:
+      type: object
+      required: [customer_id, vehicle_id, service_id, cost]
+      properties:
+        booking_id:
+          type: string
+          format: uuid
+          nullable: true
+        customer_id:
+          type: string
+          format: uuid
+        vehicle_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        technician_id:
+          type: string
+          format: uuid
+          nullable: true
+        service_date:
+          type: string
+          format: date-time
+        mileage_at_service:
+          type: integer
+          nullable: true
+        parts_used:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        cost:
+          type: number
+          format: double
+
+    ServiceHistoryUpdate:
+      type: object
+      properties:
+        mileage_at_service:
+          type: integer
+          nullable: true
+        parts_used:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        cost:
+          type: number
+          format: double
+        technician_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    # ---- Notification ----
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "e1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        user_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        title:
+          type: string
+          example: "Booking Confirmed"
+        message:
+          type: string
+          example: "Your Swift service is confirmed for tomorrow at 10:00 AM."
+        type:
+          type: string
+          nullable: true
+          description: "Visual type hint: `info`, `success`, `warning`, `error`."
+          enum: [info, success, warning, error]
+          example: "success"
+        read:
+          type: boolean
+          default: false
+          example: false
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    NotificationInsert:
+      type: object
+      required: [user_id, title, message]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        message:
+          type: string
+        type:
+          type: string
+          nullable: true
+          enum: [info, success, warning, error]
+        read:
+          type: boolean
+          default: false
+
+    NotificationUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+        message:
+          type: string
+        type:
+          type: string
+          nullable: true
+          enum: [info, success, warning, error]
+        read:
+          type: boolean
+
+    # ---- Service Reminder ----
+
+    ServiceReminder:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "f1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+        customer_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        vehicle_id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        title:
+          type: string
+          example: "Engine Oil Change Due"
+        message:
+          type: string
+          example: "Your Swift VXi is due for an oil change (target: 30,000 km)."
+        due_date:
+          type: string
+          format: date
+          example: "2026-05-15"
+        acknowledged:
+          type: boolean
+          default: false
+          example: false
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-19T01:40:54Z"
+
+    ServiceReminderInsert:
+      type: object
+      required: [customer_id, vehicle_id, title, message, due_date]
+      properties:
+        customer_id:
+          type: string
+          format: uuid
+        vehicle_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        message:
+          type: string
+        due_date:
+          type: string
+          format: date
+        acknowledged:
+          type: boolean
+          default: false
+
+    ServiceReminderUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+        message:
+          type: string
+        due_date:
+          type: string
+          format: date
+        acknowledged:
+          type: boolean
+
+    # ---- Edge Function Payloads ----
+
+    AdminCreateEmployeeRequest:
+      type: object
+      required: [email, password, full_name]
+      properties:
+        email:
+          type: string
+          format: email
+          example: "rohan.sharma@autoserve.in"
+        password:
+          type: string
+          format: password
+          minLength: 6
+          example: "Workshop@2026"
+        full_name:
+          type: string
+          example: "Rohan Sharma"
+        phone:
+          type: string
+          nullable: true
+          example: "+91 98100 22222"
+        role:
+          type: string
+          enum: [employee, manager]
+          default: "employee"
+          description: Role to assign. Defaults to `employee` if omitted or invalid.
+
+    AdminCreateEmployeeResponse:
+      type: object
+      required: [success, user_id]
+      properties:
+        success:
+          type: boolean
+          example: true
+        user_id:
+          type: string
+          format: uuid
+          description: UUID of the newly created auth user.
+          example: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    VehicleContext:
+      type: object
+      description: Optional vehicle context for AI diagnostics mode.
+      properties:
+        make:
+          type: string
+          example: "Maruti Suzuki"
+        model:
+          type: string
+          example: "Swift VXi"
+        year:
+          type: integer
+          example: 2022
+        mileage:
+          type: integer
+          example: 28450
+        fuel_type:
+          type: string
+          example: "Petrol"
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+          description: Message author role.
+          example: "user"
+        content:
+          type: string
+          description: Message text.
+          example: "What services does my Swift need at 30,000 km?"
+
+    AIDiagnosticsRequest:
+      type: object
+      required: [symptoms]
+      properties:
+        symptoms:
+          type: string
+          description: Customer-reported symptoms in plain text.
+          example: "Engine makes knocking noise when accelerating, fuel consumption increased"
+        vehicle:
+          $ref: '#/components/schemas/VehicleContext'
+
+    AIChatRequest:
+      type: object
+      required: [mode, history]
+      properties:
+        mode:
+          type: string
+          enum: [chat]
+          example: "chat"
+        context:
+          type: object
+          description: Customer and vehicle data to provide as context to the AI.
+          additionalProperties: true
+          example:
+            vehicles:
+              - make: "Maruti Suzuki"
+                model: "Swift VXi"
+                year: 2022
+        history:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+          description: Full conversation history (user + assistant turns).
+
+    AIDiagnosticsResponse:
+      type: object
+      properties:
+        probable_causes:
+          type: array
+          items:
+            type: string
+          description: 2–4 probable causes ranked by likelihood.
+          example:
+            - "Low engine oil or degraded oil viscosity"
+            - "Worn spark plugs causing misfires"
+        severity:
+          type: string
+          enum: [low, medium, high]
+          description: AI-assessed severity of the reported symptoms.
+          example: "medium"
+        recommended_service_names:
+          type: array
+          items:
+            type: string
+          description: 1–3 service names from the catalogue.
+          example: ["Basic Service", "Engine Tuning"]
+        recommended_service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Matching `services.id` values (resolved from names).
+          example: ["c1a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"]
+        advice:
+          type: string
+          description: 2–3 sentences of plain-English advice.
+          example: "We recommend scheduling a Basic Service soon to address the oil condition."
+
+    AIChatResponse:
+      type: object
+      required: [reply]
+      properties:
+        reply:
+          type: string
+          description: AI assistant reply (≤6 sentences unless detail requested).
+          example: "At 30,000 km, your Swift VXi is due for a Standard Service (₹4,499)."
+
+    AIMaintenanceTipsRequest:
+      type: object
+      description: >
+        Provide either `vehicle_id` (DB lookup) **or** the inline attributes
+        `make`, `model`, `year` (plus optional `mileage` and `fuel_type`).
+      properties:
+        vehicle_id:
+          type: string
+          format: uuid
+          description: UUID of a vehicle in the database.
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        make:
+          type: string
+          example: "Tata"
+        model:
+          type: string
+          example: "Nexon EV"
+        year:
+          type: integer
+          example: 2023
+        mileage:
+          type: integer
+          default: 0
+          example: 14200
+        fuel_type:
+          type: string
+          default: "Petrol"
+          example: "Electric"
+
+    AIMaintenanceTipsResponse:
+      type: object
+      properties:
+        tips:
+          type: array
+          items:
+            type: string
+          description: 3 short, actionable maintenance tips.
+          example:
+            - "Check tyre pressure monthly – EV torque causes faster wear."
+        recommended_service_names:
+          type: array
+          items:
+            type: string
+          description: 1–3 service names from the catalogue.
+          example: ["Diagnostic Scan", "Wheel Alignment & Balancing"]
+        recommended_service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Matching `services.id` values.
+          example: ["c2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"]
+
+    AIResaleValuationRequest:
+      type: object
+      required: [make, model, year]
+      properties:
+        make:
+          type: string
+          example: "Maruti Suzuki"
+        model:
+          type: string
+          example: "Swift VXi"
+        year:
+          type: integer
+          example: 2022
+        mileage:
+          type: integer
+          nullable: true
+          description: Current odometer reading in km.
+          example: 28450
+        fuel_type:
+          type: string
+          nullable: true
+          default: "Petrol"
+          example: "Petrol"
+        condition:
+          type: string
+          nullable: true
+          default: "Good"
+          description: "Subjective condition rating, e.g., Excellent, Good, Fair, Poor."
+          example: "Good"
+
+    AIResaleValuationResponse:
+      type: object
+      properties:
+        estimated_value_inr:
+          type: integer
+          description: Best-estimate resale value in INR.
+          example: 680000
+        low_inr:
+          type: integer
+          description: Low end of the estimated resale range in INR.
+          example: 620000
+        high_inr:
+          type: integer
+          description: High end of the estimated resale range in INR.
+          example: 740000
+        depreciation_pct:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+          description: Estimated depreciation percentage from original on-road price.
+          example: 32
+        factors:
+          type: array
+          items:
+            type: string
+          description: 3 short factors influencing the valuation.
+          example:
+            - "Low mileage for a 2022 model boosts value"
+            - "Petrol variant has steady demand in NCR"
+            - "Overall good condition with no accident history"
+        narrative:
+          type: string
+          description: 2-sentence plain-English valuation explanation.
+          example: "The 2022 Swift VXi in good condition is well-positioned in the ₹6.2–7.4 lakh range."
+
+    AIVehicleSummaryResponse:
+      type: object
+      required: [summary]
+      properties:
+        summary:
+          type: string
+          description: >
+            AI-generated 4–6 line technician brief covering maintenance state,
+            recurring issues, items due, and a priority check suggestion.
+          example: >
+            The 2022 Maruti Suzuki Swift VXi is in good overall condition with 28,450 km on the clock.
+            It received a Basic Service 45 days ago. Front brake pads were replaced at 22,300 km.
+            Today prioritise an air filter and cabin filter inspection.
+
+    SeedDemoAccountsResponse:
+      type: object
+      required: [success, accounts, ids]
+      properties:
+        success:
+          type: boolean
+          example: true
+        accounts:
+          type: array
+          items:
+            type: object
+            properties:
+              email:
+                type: string
+                format: email
+              role:
+                $ref: '#/components/schemas/AppRole'
+          example:
+            - email: "manager@autoserve.in"
+              role: "manager"
+            - email: "employee@autoserve.in"
+              role: "employee"
+            - email: "customer@autoserve.in"
+              role: "customer"
+        ids:
+          type: object
+          description: UUID mapping of role → auth user ID for the seeded accounts.
+          additionalProperties:
+            type: string
+            format: uuid
+          example:
+            manager: "b2a2a3a4-b1b2-c1c2-d1d2-e1e2e3e4e5e6"
+            employee: "e1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            customer: "550e8400-e29b-41d4-a716-446655440000"
