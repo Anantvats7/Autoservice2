@@ -31,3 +31,13 @@ jobs:
           supabase secrets set LOVABLE_API_KEY="${{ secrets.LOVABLE_API_KEY }}" --project-ref ${{ secrets.SUPABASE_PROJECT_ID }}
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Seed Demo Data
+        run: |
+          curl -X POST \
+            "https://${{ secrets.SUPABASE_PROJECT_ID }}.supabase.co/functions/v1/seed-demo-accounts" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Content-Type: application/json" \
+            --fail \
+            --silent \
+            --show-error
