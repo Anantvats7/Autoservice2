@@ -17,6 +17,7 @@ const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
 const MODELS_TO_TRY = [
   "gemini-2.5-flash-lite",
   "gemini-2.0-flash-lite",
+  "gemini-2.5-flash",
   "gemma-3-27b-it",
 ];
 

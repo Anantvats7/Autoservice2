@@ -43,9 +43,19 @@ const CustomerBookings = () => {
   const [tab, setTab] = useState<Tab>("All");
   const [qr, setQr] = useState<{ id: string; type: "dropoff" | "pickup" } | null>(null);
 
-  const { data: bookings, loading } = useLiveTable<Booking>("bookings", (q) => q.eq("customer_id", user?.id ?? "").order("scheduled_at", { ascending: false }), [user?.id], { enabled: !!user });
+  const { data: bookings, loading, refetch } = useLiveTable<Booking>("bookings", (q) => q.eq("customer_id", user?.id ?? "").order("scheduled_at", { ascending: false }), [user?.id], { enabled: !!user });
   const { data: vehiclesArr } = useLiveTable<Vehicle>("vehicles", (q) => q.eq("owner_id", user?.id ?? ""), [user?.id], { enabled: !!user });
   const { data: servicesArr } = useLiveTable<Service>("services", (q) => q);
+
+  // Refetch when the page becomes visible (e.g. navigating back from AI chat)
+  useEffect(() => {
+    const onFocus = () => refetch();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") refetch();
+    });
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refetch]);
 
   const vehicles = useMemo(() => { const m: Record<string, Vehicle> = {}; vehiclesArr.forEach((v) => { m[v.id] = v; }); return m; }, [vehiclesArr]);
   const services = useMemo(() => { const m: Record<string, Service> = {}; servicesArr.forEach((s) => { m[s.id] = s; }); return m; }, [servicesArr]);
@@ -53,6 +63,12 @@ const CustomerBookings = () => {
   // Optimistic overrides for instant cancel feedback
   const [optimistic, setOptimistic] = useState<Record<string, Partial<Booking>>>({});
   useEffect(() => { setOptimistic({}); }, [bookings]);
+
+  // Refetch on mount to catch bookings created from other pages (e.g. AI chat)
+  useEffect(() => {
+    if (user) refetch();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   const displayed = useMemo(
     () => bookings.map((b) => optimistic[b.id] ? { ...b, ...optimistic[b.id] } : b),
