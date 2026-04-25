@@ -318,10 +318,23 @@ const AIAssistant = () => {
   // ── Confirm booking ──────────────────────────────────────────────────────────
   const confirmBooking = async (msgIndex: number, intent: BookingIntent) => {
     if (!user) return;
+
+    // Validate that vehicle and service actually exist in the customer's data
+    const vehicle = vehicles.find((v) => v.id === intent.vehicle_id);
     const service = services.find((s) => s.id === intent.service_id);
-    const price = service
-      ? Math.round(service.price * (PRIORITY_SURCHARGE[intent.priority] ?? 1))
-      : 0;
+    if (!vehicle || !service) {
+      toast.error("Could not match vehicle or service. Please try again.");
+      return;
+    }
+
+    // Validate scheduled_at is a valid future date
+    const scheduledDate = new Date(intent.scheduled_at);
+    if (isNaN(scheduledDate.getTime()) || scheduledDate < new Date()) {
+      toast.error("Invalid booking date. Please try again.");
+      return;
+    }
+
+    const price = Math.round(service.price * (PRIORITY_SURCHARGE[intent.priority] ?? 1));
 
     try {
       const { error } = await supabase.from("bookings").insert({

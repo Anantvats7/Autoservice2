@@ -133,9 +133,20 @@ Deno.serve(async (req) => {
           ? `ACTIVE VEHICLE (use this by default): id="${activeVehicle.id}" -> ${activeVehicle.label} (${activeVehicle.registration}, ${activeVehicle.mileage} km)`
           : "No active vehicle selected.";
 
+        const nowIST = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+        const todayStr = nowIST.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+        const tomorrowIST = new Date(nowIST);
+        tomorrowIST.setDate(tomorrowIST.getDate() + 1);
+        const tomorrowISO = tomorrowIST.toISOString().slice(0, 10);
+
         systemPrompt = [
           "You are AutoServe AI, an expert assistant for an Indian car-service workshop.",
           "Be concise, friendly, and use Indian Rupees (Rs.).",
+          "",
+          `TODAY'S DATE (IST): ${todayStr}`,
+          `TOMORROW'S DATE: ${tomorrowISO}`,
+          "When the customer says 'tomorrow', use TOMORROW'S DATE above. When they say 'today', use TODAY'S DATE.",
+          "Always use IST (UTC+5:30) for all datetimes. Format scheduled_at as ISO 8601 with +05:30 offset.",
           "",
           `Customer: ${ctx.customer?.name ?? "Customer"}`,
           "",
@@ -154,7 +165,7 @@ Deno.serve(async (req) => {
           "When the customer wants to book a service, you MUST:",
           "1. ALWAYS use the ACTIVE VEHICLE by default — NEVER ask which vehicle unless the customer explicitly mentions a different one.",
           "2. Identify the correct service_id from the catalogue above. If the customer says 'oil change', map it to the closest service (e.g. Basic Service).",
-          "3. Pick a reasonable scheduled_at datetime (ISO 8601) — default to next business day at 10:00 AM IST if not specified.",
+          "3. Pick a reasonable scheduled_at datetime (ISO 8601 with +05:30 offset) — if the customer says 'tomorrow' use TOMORROW'S DATE at 10:00 AM IST, if they say 'today' use TODAY'S DATE at 10:00 AM IST.",
           "4. Choose priority: 'normal' (default), 'express' (+15%), or 'priority' (+30%) based on urgency cues.",
           "5. Return your reply AND a booking_intent block immediately — do NOT ask for confirmation questions.",
           "",

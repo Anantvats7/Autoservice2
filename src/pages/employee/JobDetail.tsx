@@ -98,20 +98,44 @@ const EmployeeJobDetail = () => {
       type: (newStatus === "completed" || newStatus === "released" || newStatus === "ready_for_pickup") ? "success" : "info",
     });
 
-    // service_history is auto-created by DB trigger on completed/released — no manual insert needed.
-    // If technician provided extra context (parts, mileage), patch the row now.
+    // service_history is auto-created by DB trigger on completed/released.
+    // If technician provided extra context (parts, mileage), patch the row.
+    // The trigger may take a moment, so we retry up to 3 times with a short delay.
     if ((newStatus === "completed" || newStatus === "released") && (partsUsed || mileageAtService)) {
-      const { data: existing } = await supabase
-        .from("service_history")
-        .select("id")
-        .eq("booking_id", booking.id)
-        .maybeSingle();
-      if (existing?.id) {
-        await supabase.from("service_history").update({
-          parts_used: partsUsed || null,
-          mileage_at_service: mileageAtService ? parseInt(mileageAtService, 10) : null,
-        }).eq("id", existing.id);
-      }
+      const patchHistory = async (retries = 3): Promise<void> => {
+        const { data: existing } = await supabase
+          .from("service_history")
+          .select("id")
+          .eq("booking_id", booking.id)
+          .maybeSingle();
+
+        if (existing?.id) {
+          // Row exists — update it
+          await supabase.from("service_history").update({
+            parts_used: partsUsed || null,
+            mileage_at_service: mileageAtService ? parseInt(mileageAtService, 10) : null,
+          }).eq("id", existing.id);
+        } else if (retries > 0) {
+          // Trigger hasn't fired yet — wait 800ms and retry
+          await new Promise((r) => setTimeout(r, 800));
+          return patchHistory(retries - 1);
+        } else {
+          // Trigger never fired — insert the row ourselves as fallback
+          await supabase.from("service_history").insert({
+            booking_id: booking.id,
+            customer_id: booking.customer_id,
+            vehicle_id: booking.vehicle_id,
+            service_id: booking.service_id,
+            technician_id: user?.id ?? null,
+            service_date: new Date().toISOString(),
+            cost: booking.total_cost ?? 0,
+            parts_used: partsUsed || null,
+            mileage_at_service: mileageAtService ? parseInt(mileageAtService, 10) : null,
+            notes: notes || null,
+          });
+        }
+      };
+      await patchHistory();
     }
   };
 
