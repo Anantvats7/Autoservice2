@@ -12,62 +12,79 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
-const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+// ── Model fallback chain ─────────────────────────────────────────────────────
+const MODELS_TO_TRY = [
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash-lite",
+  "gemma-3-27b-it",
+];
 
-// ── Retry with exponential backoff ───────────────────────────────────────────
-async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
-  let lastError: Error = new Error("Unknown error");
+function geminiUrl(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+}
+
+// ── Retry with exponential backoff + jitter for a single model ───────────────
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  maxRetries = 2
+): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const res = await fetch(url, init);
     if (res.status !== 429 && res.status !== 503) return res;
     const retryAfter = res.headers.get("Retry-After");
-    const waitMs = retryAfter
-      ? parseInt(retryAfter) * 1000
-      : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 16000);
-    console.warn(`Gemini rate limited. Attempt ${attempt + 1}/${maxRetries}. Waiting ${waitMs}ms...`);
+    const base = Math.min(1000 * Math.pow(2, attempt), 8000);
+    const jitter = Math.random() * 500;
+    const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : base + jitter;
+    console.warn(`Rate limited on attempt ${attempt + 1}. Waiting ${Math.round(waitMs)}ms...`);
     if (attempt < maxRetries) await new Promise((r) => setTimeout(r, waitMs));
-    lastError = Object.assign(new Error("Rate limited after retries"), { status: 429 });
+  }
+  const err: any = new Error("Rate limited after retries");
+  err.status = 429;
+  throw err;
+}
+
+// ── Try each model in order, move to next on 429/503 ────────────────────────
+async function callWithFallback(buildBody: (jsonMode: boolean) => any, jsonMode = true): Promise<string> {
+  let lastError: any = new Error("All models failed");
+  for (const model of MODELS_TO_TRY) {
+    const url = geminiUrl(model);
+    const body = buildBody(jsonMode);
+    // gemma models don't support system_instruction or responseMimeType
+    if (model.startsWith("gemma")) {
+      delete body.system_instruction;
+      if (body.generationConfig) delete body.generationConfig.responseMimeType;
+    }
+    try {
+      const res = await fetchWithRetry(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 429 || res.status === 503) {
+        console.warn(`Model ${model} rate limited, trying next...`);
+        continue;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        console.warn(`Model ${model} error ${res.status}: ${text}`);
+        lastError = Object.assign(new Error(`AI error ${res.status}`), { status: res.status });
+        continue;
+      }
+      const data = await res.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+      console.log(`Responded using model: ${model}`);
+      return text;
+    } catch (e: any) {
+      console.warn(`Model ${model} threw: ${e.message}`);
+      lastError = e;
+    }
   }
   throw lastError;
 }
 
-async function callGemini(systemPrompt: string, userPrompt: string, jsonMode = true): Promise<string> {
-  const body: any = {
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-  };
-  if (jsonMode) body.generationConfig = { responseMimeType: "application/json" };
-  const res = await fetchWithRetry(GEMINI_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw Object.assign(new Error(`Gemini error ${res.status}`), { status: res.status });
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-}
-
-async function callGeminiChat(systemPrompt: string, history: Array<{ role: string; content: string }>, jsonMode = true): Promise<string> {
-  const contents = history.map((m) => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }],
-  }));
-  const body: any = {
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents,
-  };
-  if (jsonMode) body.generationConfig = { responseMimeType: "application/json" };
-  const res = await fetchWithRetry(GEMINI_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw Object.assign(new Error(`Gemini error ${res.status}`), { status: res.status });
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-}
+const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -83,7 +100,6 @@ Deno.serve(async (req) => {
 
       const ctx = body.context ?? {};
 
-      // Detect manager/analyst mode — empty context means no vehicles/services
       const isAnalystMode =
         (!Array.isArray(ctx.vehicles) || ctx.vehicles.length === 0) &&
         (!Array.isArray(ctx.services) || ctx.services.length === 0);
@@ -117,8 +133,6 @@ Deno.serve(async (req) => {
           ? `ACTIVE VEHICLE (use this by default): id="${activeVehicle.id}" -> ${activeVehicle.label} (${activeVehicle.registration}, ${activeVehicle.mileage} km)`
           : "No active vehicle selected.";
 
-        const recentBookings = JSON.stringify(ctx.recent_bookings ?? [], null, 2);
-
         systemPrompt = [
           "You are AutoServe AI, an expert assistant for an Indian car-service workshop.",
           "Be concise, friendly, and use Indian Rupees (Rs.).",
@@ -134,7 +148,7 @@ Deno.serve(async (req) => {
           serviceList,
           "",
           "Recent bookings:",
-          recentBookings,
+          JSON.stringify(ctx.recent_bookings ?? [], null, 2),
           "",
           "BOOKING CAPABILITY:",
           "When the customer wants to book a service, you MUST:",
@@ -144,29 +158,38 @@ Deno.serve(async (req) => {
           "4. Choose priority: 'normal' (default), 'express' (+15%), or 'priority' (+30%) based on urgency cues.",
           "5. Return your reply AND a booking_intent block immediately — do NOT ask for confirmation questions.",
           "",
-          "Your response MUST be valid JSON in this exact shape when booking intent is detected:",
+          "When booking intent detected return:",
           '{ "reply": "confirmation message", "booking_intent": { "vehicle_id": "<id>", "service_id": "<id>", "scheduled_at": "<ISO 8601>", "priority": "normal", "notes": "" } }',
-          "",
-          "When NO booking is needed, return: { \"reply\": \"your response\" }",
+          "When NO booking needed return: { \"reply\": \"your response\" }",
           "",
           "Rules:",
           "- ONLY use vehicle_ids and service_ids from the lists above. Never invent IDs.",
-          "- NEVER ask 'which vehicle?' — always default to the ACTIVE VEHICLE.",
-          "- NEVER ask 'which service?' — map the request to the closest catalogue match and proceed.",
+          "- NEVER ask which vehicle — always default to the ACTIVE VEHICLE.",
+          "- NEVER ask which service — map the request to the closest catalogue match and proceed.",
           "- Keep replies under 5 sentences.",
           "- Always respond with valid JSON — no markdown, no preamble.",
         ].join("\n");
       }
 
+      const contents = history.map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }],
+      }));
+
       try {
-        const raw = await callGeminiChat(systemPrompt, history, true);
+        const raw = await callWithFallback((jsonMode) => ({
+          system_instruction: { parts: [{ text: systemPrompt }] },
+          contents,
+          ...(jsonMode ? { generationConfig: { responseMimeType: "application/json" } } : {}),
+        }), true);
+
         let parsed: any = {};
         try { parsed = JSON.parse(raw); } catch { parsed = { reply: raw }; }
         const reply = String(parsed.reply ?? parsed.message ?? "Sorry, I could not generate a response.");
         const booking_intent = parsed.booking_intent ?? null;
         return json(200, { reply, booking_intent });
       } catch (e: any) {
-        if (e.status === 429) return json(429, { error: "Rate limited. Please try again in a moment." });
+        if (e.status === 429) return json(429, { error: "All AI models are rate limited. Please try again in a moment." });
         return json(500, { error: String(e) });
       }
     }
@@ -195,22 +218,21 @@ Deno.serve(async (req) => {
       "Available services (use the IDs verbatim):",
       catalogText,
       "",
-      "Return STRICT JSON in exactly this shape:",
+      "Return STRICT JSON:",
       '{ "faults": [{ "name": "fault name", "description": "1 sentence", "confidence": 80 }], "recommended_service_ids": ["<id>"], "proTip": "one actionable sentence" }',
       "",
-      "Rules:",
-      "- 2 to 4 faults, ranked by likelihood (highest confidence first).",
-      "- confidence is an integer 0-100.",
-      "- recommended_service_ids must use ONLY ids from the list above; pick 1-3 most relevant.",
-      "- proTip should be plain English, friendly, and actionable.",
+      "Rules: 2-4 faults ranked by confidence (0-100). recommended_service_ids from list only (1-3). proTip plain English.",
     ].join("\n");
 
+    const sysPrompt = "You are an experienced automotive diagnostic technician for the Indian market. Output valid JSON only, exactly matching the requested schema.";
+
     try {
-      const raw = await callGemini(
-        "You are an experienced automotive diagnostic technician for the Indian market. Output valid JSON only, exactly matching the requested schema.",
-        userPrompt,
-        true
-      );
+      const raw = await callWithFallback((jsonMode) => ({
+        system_instruction: { parts: [{ text: sysPrompt }] },
+        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+        ...(jsonMode ? { generationConfig: { responseMimeType: "application/json" } } : {}),
+      }), true);
+
       let parsed: any = {};
       try { parsed = JSON.parse(raw); } catch { return json(500, { error: "Invalid AI response" }); }
 
@@ -230,7 +252,7 @@ Deno.serve(async (req) => {
       const proTip = String(parsed.proTip ?? parsed.advice ?? "Get this checked at the workshop soon.");
       return json(200, { faults, recommended_service_ids, proTip });
     } catch (e: any) {
-      if (e.status === 429) return json(429, { error: "Rate limited. Please try again in a moment." });
+      if (e.status === 429) return json(429, { error: "All AI models are rate limited. Please try again in a moment." });
       return json(500, { error: String(e) });
     }
   } catch (e) {

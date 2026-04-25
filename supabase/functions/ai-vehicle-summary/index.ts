@@ -1,5 +1,4 @@
 // Generates an AI-written maintenance summary for a vehicle from its service history.
-// Used on Employee JobDetail page so technicians get a fast brief on past work.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const corsHeaders = {
@@ -10,26 +9,58 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
-const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+const MODELS_TO_TRY = ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemma-3-27b-it"];
 
-// ── Retry with exponential backoff ───────────────────────────────────────────
-async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
-  let lastError: Error = new Error("Unknown error");
+function geminiUrl(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+}
+
+async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 2): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const res = await fetch(url, init);
     if (res.status !== 429 && res.status !== 503) return res;
     const retryAfter = res.headers.get("Retry-After");
-    const waitMs = retryAfter
-      ? parseInt(retryAfter) * 1000
-      : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 16000);
-    console.warn(`Gemini rate limited. Attempt ${attempt + 1}/${maxRetries}. Waiting ${waitMs}ms...`);
+    const base = Math.min(1000 * Math.pow(2, attempt), 8000);
+    const jitter = Math.random() * 500;
+    const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : base + jitter;
+    console.warn(`Rate limited on attempt ${attempt + 1}. Waiting ${Math.round(waitMs)}ms...`);
     if (attempt < maxRetries) await new Promise((r) => setTimeout(r, waitMs));
-    lastError = Object.assign(new Error("Rate limited after retries"), { status: 429 });
+  }
+  const err: any = new Error("Rate limited after retries");
+  err.status = 429;
+  throw err;
+}
+
+async function callWithFallback(buildBody: (jsonMode: boolean) => any, jsonMode = true): Promise<string> {
+  let lastError: any = new Error("All models failed");
+  for (const model of MODELS_TO_TRY) {
+    const url = geminiUrl(model);
+    const body = buildBody(jsonMode);
+    if (model.startsWith("gemma")) {
+      delete body.system_instruction;
+      if (body.generationConfig) delete body.generationConfig.responseMimeType;
+    }
+    try {
+      const res = await fetchWithRetry(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 429 || res.status === 503) { console.warn(`Model ${model} rate limited, trying next...`); continue; }
+      if (!res.ok) { console.warn(`Model ${model} error ${res.status}`); lastError = Object.assign(new Error(`AI error ${res.status}`), { status: res.status }); continue; }
+      const data = await res.json();
+      console.log(`Responded using model: ${model}`);
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    } catch (e: any) {
+      console.warn(`Model ${model} threw: ${e.message}`);
+      lastError = e;
+    }
   }
   throw lastError;
 }
+
+const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -59,46 +90,40 @@ Deno.serve(async (req) => {
       const date = h.service_date
         ? new Date(h.service_date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
         : "Unknown date";
-      return `- ${date} • ${h.service ?? "Service"} • ${h.mileage_at_service ?? "?"} km • ₹${h.cost ?? "?"} • Notes: ${h.notes ?? "—"} • Parts: ${h.parts_used ?? "—"}`;
+      return `- ${date} | ${h.service ?? "Service"} | ${h.mileage_at_service ?? "?"} km | Rs.${h.cost ?? "?"} | Notes: ${h.notes ?? "-"} | Parts: ${h.parts_used ?? "-"}`;
     }).join("\n");
 
-    const userPrompt = `Vehicle: ${vehicle.year} ${vehicle.make} ${vehicle.model} (${vehicle.fuel_type ?? "Petrol"})
-Registration: ${vehicle.registration ?? "—"}
-Current Odometer: ${vehicle.mileage ?? "?"} km
-${currentService ? `Today's job: ${currentService}` : ""}
+    const userPrompt = [
+      `Vehicle: ${vehicle.year} ${vehicle.make} ${vehicle.model} (${vehicle.fuel_type ?? "Petrol"})`,
+      `Registration: ${vehicle.registration ?? "-"}, Odometer: ${vehicle.mileage ?? "?"} km`,
+      currentService ? `Today's job: ${currentService}` : "",
+      "",
+      "Service history (most recent first):",
+      histLines || "No prior service history.",
+      "",
+      "Write a concise 4-6 line technician briefing covering:",
+      "1. Overall maintenance state",
+      "2. Recurring issues or patterns",
+      "3. Items likely due based on mileage/time",
+      "4. One specific check to prioritise today",
+      "Use plain paragraphs only. Address the technician, not the customer.",
+    ].join("\n");
 
-Service history (most recent first):
-${histLines || "No prior service history."}
+    const sysPrompt = "You are a senior automotive service advisor. Be concise, technical and actionable.";
 
-Write a concise 4-6 line briefing that:
-1. Summarises the vehicle's overall maintenance state (well-maintained / needs attention / new vehicle).
-2. Highlights any recurring issues or patterns.
-3. Flags items likely due based on mileage and time gaps.
-4. Suggests one specific check the technician should prioritise today.
-
-Use plain, clear language. Flowing paragraphs only — no bullet points. Address the technician, not the customer.`;
-
-    const res = await fetchWithRetry(GEMINI_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: "You are a senior automotive service advisor. Be concise, technical and actionable." }] },
+    try {
+      const summary = await callWithFallback((_jsonMode) => ({
+        system_instruction: { parts: [{ text: sysPrompt }] },
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      }),
-    });
+      }), false);
 
-    if (!res.ok) {
-      const text = await res.text();
-      console.error("Gemini error", res.status, text);
-      return json(500, { error: `AI error ${res.status}` });
+      return json(200, { summary: summary || "Unable to generate summary." });
+    } catch (e: any) {
+      if (e.status === 429) return json(429, { error: "All AI models are rate limited. Please try again in a moment." });
+      return json(500, { error: String(e) });
     }
-
-    const data = await res.json();
-    const summary = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "Unable to generate summary.";
-    return json(200, { summary });
-  } catch (e: any) {
+  } catch (e) {
     console.error(e);
-    if (e.status === 429) return json(429, { error: "Rate limited. Please try again in a moment." });
     return json(500, { error: String(e) });
   }
 });

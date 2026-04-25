@@ -1,5 +1,4 @@
 // Returns AI maintenance tips + recommended services for a vehicle.
-// Accepts EITHER { vehicle_id } (server lookup) OR { make, model, year, mileage, fuel_type } (client-supplied).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
 const corsHeaders = {
@@ -10,26 +9,58 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
-const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+const MODELS_TO_TRY = ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemma-3-27b-it"];
 
-// ── Retry with exponential backoff ───────────────────────────────────────────
-async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
-  let lastError: Error = new Error("Unknown error");
+function geminiUrl(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+}
+
+async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 2): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const res = await fetch(url, init);
     if (res.status !== 429 && res.status !== 503) return res;
     const retryAfter = res.headers.get("Retry-After");
-    const waitMs = retryAfter
-      ? parseInt(retryAfter) * 1000
-      : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 16000);
-    console.warn(`Gemini rate limited. Attempt ${attempt + 1}/${maxRetries}. Waiting ${waitMs}ms...`);
+    const base = Math.min(1000 * Math.pow(2, attempt), 8000);
+    const jitter = Math.random() * 500;
+    const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : base + jitter;
+    console.warn(`Rate limited on attempt ${attempt + 1}. Waiting ${Math.round(waitMs)}ms...`);
     if (attempt < maxRetries) await new Promise((r) => setTimeout(r, waitMs));
-    lastError = Object.assign(new Error("Rate limited after retries"), { status: 429 });
+  }
+  const err: any = new Error("Rate limited after retries");
+  err.status = 429;
+  throw err;
+}
+
+async function callWithFallback(buildBody: (jsonMode: boolean) => any, jsonMode = true): Promise<string> {
+  let lastError: any = new Error("All models failed");
+  for (const model of MODELS_TO_TRY) {
+    const url = geminiUrl(model);
+    const body = buildBody(jsonMode);
+    if (model.startsWith("gemma")) {
+      delete body.system_instruction;
+      if (body.generationConfig) delete body.generationConfig.responseMimeType;
+    }
+    try {
+      const res = await fetchWithRetry(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 429 || res.status === 503) { console.warn(`Model ${model} rate limited, trying next...`); continue; }
+      if (!res.ok) { console.warn(`Model ${model} error ${res.status}`); lastError = Object.assign(new Error(`AI error ${res.status}`), { status: res.status }); continue; }
+      const data = await res.json();
+      console.log(`Responded using model: ${model}`);
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+    } catch (e: any) {
+      console.warn(`Model ${model} threw: ${e.message}`);
+      lastError = e;
+    }
   }
   throw lastError;
 }
+
+const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 interface Body {
   vehicle_id?: string;
@@ -47,7 +78,7 @@ Deno.serve(async (req) => {
   try {
     const body = (await req.json()) as Body;
 
-    let vehicle: { make: string; model: string; year: number; mileage: number; fuel_type: string | null; id?: string } | null = null;
+    let vehicle: { make: string; model: string; year: number; mileage: number; fuel_type: string | null } | null = null;
     let recentServiceNames: string[] = [];
 
     if (body.vehicle_id) {
@@ -63,68 +94,56 @@ Deno.serve(async (req) => {
         recentServiceNames = (history as any[]).map((h) => svcs?.find((s: any) => s.id === h.service_id)?.name).filter(Boolean) as string[];
       }
     } else if (body.make && body.model && body.year != null) {
-      vehicle = {
-        make: body.make,
-        model: body.model,
-        year: body.year,
-        mileage: body.mileage ?? 0,
-        fuel_type: body.fuel_type ?? "Petrol",
-      };
+      vehicle = { make: body.make, model: body.model, year: body.year, mileage: body.mileage ?? 0, fuel_type: body.fuel_type ?? "Petrol" };
     } else {
       return json(400, { error: "Provide either vehicle_id or {make, model, year}" });
     }
 
     const { data: services } = await admin.from("services").select("id, name, category, price").eq("active", true);
-    const catalog = (services ?? []).map((s: any) => `${s.name} [${s.category}] – ₹${s.price}`).join("\n");
+    const catalog = (services ?? []).map((s: any) => `${s.name} [${s.category}] Rs.${s.price}`).join("\n");
 
-    const userPrompt = `Vehicle profile:
-- ${vehicle!.year} ${vehicle!.make} ${vehicle!.model} (${vehicle!.fuel_type ?? "Petrol"})
-- Current mileage: ${vehicle!.mileage} km
-- Recent services: ${recentServiceNames.length ? recentServiceNames.join(", ") : "none recorded"}
+    const userPrompt = [
+      "Vehicle profile:",
+      `- ${vehicle!.year} ${vehicle!.make} ${vehicle!.model} (${vehicle!.fuel_type ?? "Petrol"})`,
+      `- Current mileage: ${vehicle!.mileage} km`,
+      `- Recent services: ${recentServiceNames.length ? recentServiceNames.join(", ") : "none recorded"}`,
+      "",
+      "Available services in our catalogue:",
+      catalog,
+      "",
+      "Return JSON with these exact fields:",
+      '{ "tips": ["3 short actionable maintenance tips"], "recommended_service_names": ["1-3 service names from catalogue"] }',
+      "",
+      "Rules: recommended_service_names MUST be exact names from catalogue. For EVs, never recommend oil/spark plug services.",
+    ].join("\n");
 
-Available services in our catalogue:
-${catalog}
+    const sysPrompt = "You are an expert automotive maintenance advisor for Indian car owners. Reply with valid JSON only, no preamble.";
 
-Return a JSON object with these exact fields:
-{
-  "tips": ["3 short, actionable maintenance tips specific to this vehicle's age, mileage, fuel type"],
-  "recommended_service_names": ["1-3 service names from the catalogue above that this customer should book next"]
-}
-
-Important:
-- recommended_service_names MUST be exact names from the catalogue.
-- Skip services already done in the last 30 days unless mileage warrants.
-- For EVs, never recommend oil/spark plug services.`;
-
-    const res = await fetchWithRetry(GEMINI_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: "You are an expert automotive maintenance advisor for Indian car owners. Reply with valid JSON only, no preamble." }] },
+    try {
+      const raw = await callWithFallback((jsonMode) => ({
+        system_instruction: { parts: [{ text: sysPrompt }] },
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        generationConfig: { responseMimeType: "application/json" },
-      }),
-    });
+        ...(jsonMode ? { generationConfig: { responseMimeType: "application/json" } } : {}),
+      }), true);
 
-    if (!res.ok) return json(500, { error: `AI error ${res.status}` });
+      let parsed: any = {};
+      try { parsed = JSON.parse(raw); } catch { parsed = { tips: [raw], recommended_service_names: [] }; }
 
-    const data = await res.json();
-    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-    let parsed: any = {};
-    try { parsed = JSON.parse(raw); } catch { parsed = { tips: [raw], recommended_service_names: [] }; }
+      const recIds = (parsed.recommended_service_names ?? [])
+        .map((n: string) => services?.find((s: any) => s.name.toLowerCase() === String(n).toLowerCase())?.id)
+        .filter(Boolean);
 
-    const recIds = (parsed.recommended_service_names ?? [])
-      .map((n: string) => services?.find((s: any) => s.name.toLowerCase() === String(n).toLowerCase())?.id)
-      .filter(Boolean);
-
-    return json(200, {
-      tips: parsed.tips ?? [],
-      recommended_service_ids: recIds,
-      recommended_service_names: parsed.recommended_service_names ?? [],
-    });
-  } catch (e: any) {
+      return json(200, {
+        tips: parsed.tips ?? [],
+        recommended_service_ids: recIds,
+        recommended_service_names: parsed.recommended_service_names ?? [],
+      });
+    } catch (e: any) {
+      if (e.status === 429) return json(429, { error: "All AI models are rate limited. Please try again in a moment." });
+      return json(500, { error: String(e) });
+    }
+  } catch (e) {
     console.error(e);
-    if (e.status === 429) return json(429, { error: "Rate limited. Please try again in a moment." });
     return json(500, { error: String(e) });
   }
 });
