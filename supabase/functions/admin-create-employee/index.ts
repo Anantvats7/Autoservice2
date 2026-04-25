@@ -1,6 +1,6 @@
 // Edge function: Manager creates a new employee account.
 // Auth required: caller must be a manager. Verifies via JWT against the user_roles table.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
