@@ -19,7 +19,7 @@ Built on **React 18 + Vite + TypeScript + Tailwind**, backed by **Supabase** (Po
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/anupp29/autoserve2.git
+git clone repo name
 cd autoserve2
 ```
 
