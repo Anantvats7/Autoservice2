@@ -91,7 +91,7 @@ The workshop's service catalogue (what they offer).
 - `active` flag — inactive services are hidden from customers
 - Managed by managers only
 
-#### `bookings`
+#### `bookings`. 2
 The core table — every service appointment.
 - `customer_id` → who booked it
 - `vehicle_id` → which car
