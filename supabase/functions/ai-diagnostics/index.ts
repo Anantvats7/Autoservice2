@@ -174,6 +174,8 @@ Deno.serve(async (req) => {
           "b) Service: Map the customer's words to the closest service_id in the catalogue. NEVER ask 'which service?' — just pick the best match.",
           "   Examples: 'oil change' -> Basic Service, 'full service' -> Comprehensive Service, 'AC not cooling' -> AC Service & Gas Refill, 'brakes' -> Front Brake Pads Replacement.",
           "c) Date: Use the date the customer specifies. 'tomorrow' = TOMORROW'S DATE at 10:00 AM IST. 'today' = TODAY'S DATE at 10:00 AM IST. No date given = TOMORROW'S DATE at 10:00 AM IST.",
+          "   Workshop hours are 9:00 AM to 6:00 PM IST only. If the customer requests a time outside this range, silently use the nearest valid slot (before 9 AM → 9 AM, after 6 PM → next day 9 AM).",
+          "   Always set scheduled_at to a time between 09:00 and 18:00 IST (+05:30). Never schedule outside these hours.",
           "d) Priority: 'normal' by default. 'urgent'/'ASAP'/'emergency' = 'priority'. 'express'/'fast' = 'express'.",
           "e) Return reply + booking_intent in ONE response. Do NOT ask any follow-up questions before returning the booking card.",
           "",
@@ -221,7 +223,32 @@ Deno.serve(async (req) => {
         // Only pass booking_intent if the last user message contains booking language
         const lastUserMsg = history.filter(m => m.role === "user").pop()?.content?.toLowerCase() ?? "";
         const isBookingRequest = /\b(book|schedule|appointment|reserve|set up|make a booking)\b/.test(lastUserMsg);
-        const booking_intent = (isBookingRequest && parsed.booking_intent) ? parsed.booking_intent : null;
+        let booking_intent = (isBookingRequest && parsed.booking_intent) ? parsed.booking_intent : null;
+
+        // Clamp scheduled_at to workshop hours: 9:00 AM – 6:00 PM IST
+        if (booking_intent?.scheduled_at) {
+          const dt = new Date(booking_intent.scheduled_at);
+          if (!isNaN(dt.getTime())) {
+            // Convert to IST (UTC+5:30) to check hour
+            const istOffset = 5.5 * 60 * 60 * 1000;
+            const istMs = dt.getTime() + istOffset;
+            const istDate = new Date(istMs);
+            const hour = istDate.getUTCHours();
+            const minute = istDate.getUTCMinutes();
+            const totalMinutes = hour * 60 + minute;
+
+            if (totalMinutes < 9 * 60) {
+              // Before 9 AM → set to 9:00 AM same day
+              istDate.setUTCHours(9, 0, 0, 0);
+              booking_intent = { ...booking_intent, scheduled_at: new Date(istDate.getTime() - istOffset).toISOString().replace("Z", "+05:30") };
+            } else if (totalMinutes >= 18 * 60) {
+              // After 6 PM → set to 9:00 AM next day
+              istDate.setUTCDate(istDate.getUTCDate() + 1);
+              istDate.setUTCHours(9, 0, 0, 0);
+              booking_intent = { ...booking_intent, scheduled_at: new Date(istDate.getTime() - istOffset).toISOString().replace("Z", "+05:30") };
+            }
+          }
+        }
 
         return json(200, { reply, booking_intent });
       } catch (e: any) {
