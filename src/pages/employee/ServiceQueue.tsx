@@ -131,6 +131,9 @@ const EmployeeServiceQueue = () => {
                     </td>
                     <td className="py-4 px-4 text-sm text-muted-foreground">
                       {formatDate(j.scheduled_at)} • {formatTime(j.scheduled_at)}
+                      {["pending", "confirmed", "checked_in"].includes(j.status) && new Date(j.scheduled_at) < new Date() && (
+                        <span className="ml-2 text-[10px] font-bold uppercase tracking-wider text-destructive bg-destructive/10 px-1.5 py-0.5 rounded">Overdue</span>
+                      )}
                     </td>
                     <td className="py-4 px-4">
                       <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full ${statusColor[j.status]}`}>

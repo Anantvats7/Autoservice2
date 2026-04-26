@@ -74,8 +74,15 @@ const BookService = () => {
 
   const submit = async () => {
     if (!user || selectedIds.size === 0 || !selectedVehicle) return;
-    setBusy(true);
+
+    // Validate that the selected date + time is in the future
     const scheduled_at = new Date(`${date}T${time}:00`).toISOString();
+    if (new Date(scheduled_at) < new Date()) {
+      toast.error("Please select a future date and time.");
+      return;
+    }
+
+    setBusy(true);
     const orderedIds = selectedServices.map((s) => s.id);
     const primaryId = orderedIds[0];
     const extras = orderedIds.slice(1);
@@ -230,13 +237,25 @@ const BookService = () => {
               <input type="date" min={todayPlus(0)} value={date} onChange={(e) => setDate(e.target.value)} className="w-full bg-surface-container-low border border-border/30 rounded-xl py-3 px-4 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none" />
             </div>
             <div className="bg-card p-6 rounded-xl border border-border/20 shadow-sm">
-              <h3 className="font-bold text-on-surface mb-4">Select Time Slot</h3>
+              <h3 className="font-bold text-on-surface mb-1">Select Time Slot</h3>
+              <p className="text-xs text-muted-foreground mb-4">Workshop hours: 9:00 AM – 6:00 PM IST</p>
               <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                {timeSlots.map((t) => (
-                  <button key={t} onClick={() => setTime(t)} className={`py-3 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all ${time === t ? "bg-primary text-primary-foreground shadow-lg" : "bg-surface-container-low border border-border/30 text-on-surface hover:border-primary/30"}`}>
-                    <Clock className="w-3.5 h-3.5" /> {t}
-                  </button>
-                ))}
+                {timeSlots.map((t) => {
+                  const slotDateTime = new Date(`${date}T${t}:00`);
+                  const isPast = slotDateTime < new Date();
+                  return (
+                    <button key={t} onClick={() => !isPast && setTime(t)} disabled={isPast}
+                      className={`py-3 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all ${
+                        isPast
+                          ? "bg-surface-container-low border border-border/20 text-muted-foreground/40 cursor-not-allowed line-through"
+                          : time === t
+                          ? "bg-primary text-primary-foreground shadow-lg"
+                          : "bg-surface-container-low border border-border/30 text-on-surface hover:border-primary/30"
+                      }`}>
+                      <Clock className="w-3.5 h-3.5" /> {t}
+                    </button>
+                  );
+                })}
               </div>
             </div>
             <div className="bg-card p-6 rounded-xl border border-border/20 shadow-sm">

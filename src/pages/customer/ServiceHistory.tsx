@@ -64,7 +64,7 @@ const CustomerServiceHistory = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-card p-5 rounded-xl border border-border/20 shadow-sm">
           <p className="text-muted-foreground text-[10px] uppercase tracking-[0.15em] font-bold">Total Services</p>
           <p className="text-2xl font-black text-on-surface mt-1">{filtered.length}</p>
@@ -72,6 +72,10 @@ const CustomerServiceHistory = () => {
         <div className="bg-card p-5 rounded-xl border border-border/20 shadow-sm">
           <p className="text-muted-foreground text-[10px] uppercase tracking-[0.15em] font-bold">Total Spent</p>
           <p className="text-2xl font-black text-on-surface mt-1 font-mono">{formatINR(totalSpent)}</p>
+        </div>
+        <div className="bg-card p-5 rounded-xl border border-border/20 shadow-sm">
+          <p className="text-muted-foreground text-[10px] uppercase tracking-[0.15em] font-bold">Avg. Per Service</p>
+          <p className="text-2xl font-black text-on-surface mt-1 font-mono">{filtered.length > 0 ? formatINR(Math.round(totalSpent / filtered.length)) : "—"}</p>
         </div>
         <div className="bg-card p-5 rounded-xl border border-border/20 shadow-sm">
           <p className="text-muted-foreground text-[10px] uppercase tracking-[0.15em] font-bold">Vehicles</p>

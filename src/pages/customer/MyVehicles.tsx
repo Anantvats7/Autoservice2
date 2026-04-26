@@ -27,6 +27,7 @@ const empty = { make: "Maruti Suzuki", model: "", year: new Date().getFullYear()
 const CustomerVehicles = () => {
   const { user } = useAuth();
   const { data: vehicles, loading } = useLiveTable<Vehicle>("vehicles", (q) => q.eq("owner_id", user?.id ?? "").order("created_at", { ascending: false }), [user?.id], { enabled: !!user });
+  const { data: bookings } = useLiveTable<any>("bookings", (q) => q.eq("customer_id", user?.id ?? "").in("status", ["pending", "confirmed", "checked_in", "in_progress", "ready_for_pickup"]), [user?.id], { enabled: !!user });
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Vehicle | null>(null);
@@ -103,6 +104,12 @@ const CustomerVehicles = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {vehicles.map((v) => {
             const tip = tipsByVehicle[v.id];
+            const activeBooking = bookings.find((b: any) => b.vehicle_id === v.id);
+            const vehicleStatusBadge = activeBooking
+              ? activeBooking.status === "in_progress" || activeBooking.status === "checked_in"
+                ? { label: "In Service", cls: "bg-primary/10 text-primary" }
+                : { label: "Booked", cls: "bg-amber-50 text-amber-600" }
+              : null;
             return (
               <div key={v.id} className="bg-card rounded-xl border border-border/20 shadow-sm overflow-hidden hover:shadow-md transition-all">
                 <div className="p-5">
@@ -114,7 +121,11 @@ const CustomerVehicles = () => {
                         <p className="text-xs text-muted-foreground">{v.color || "—"} • {v.fuel_type}</p>
                       </div>
                     </div>
-                    <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider bg-emerald-50 text-emerald-600 shrink-0">Active</span>
+                    {vehicleStatusBadge && (
+                      <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider shrink-0 ${vehicleStatusBadge.cls}`}>
+                        {vehicleStatusBadge.label}
+                      </span>
+                    )}
                   </div>
                   <div className="mt-3 flex items-center justify-between">
                     <span className="text-xs font-mono bg-surface-container px-2 py-1 rounded">{v.registration}</span>

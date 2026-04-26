@@ -34,9 +34,9 @@ npm install
 Create a `.env` file in the project root with the following values:
 
 ```env
-VITE_SUPABASE_URL="https://vlktrhfqjsbnmomrwthj.supabase.co"
-VITE_SUPABASE_PUBLISHABLE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsa3RyaGZxanNibm1vbXJ3dGhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1Nzc5NTcsImV4cCI6MjA5MjE1Mzk1N30.RnGDg9ZlX2vsk0JhSHZ3oXKquRKGVYkcpV_aUlPjfGk"
-VITE_SUPABASE_PROJECT_ID="vlktrhfqjsbnmomrwthj"
+VITE_SUPABASE_URL=""
+VITE_SUPABASE_PUBLISHABLE_KEY=""
+VITE_SUPABASE_PROJECT_ID=""
 ```
 
 > These values are already present in the `.env` file if you cloned the repo. No further changes are needed for local development.

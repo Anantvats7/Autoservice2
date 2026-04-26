@@ -452,3 +452,80 @@ A: `vlktrhfqjsbnmomrwthj`
 
 **Q: What AI model is used?**
 A: Google Gemini. Primary: `gemini-2.5-flash-lite`. Fallback: `gemini-2.0-flash-lite`. The fallback activates automatically if the primary model is rate-limited, with exponential backoff and jitter between retries.
+
+
+Supabase auto-generates a REST API for every table you create. You don't write any API code — it's automatic.
+
+---
+
+## How It Works
+
+When you run a migration like:
+
+```sql
+CREATE TABLE public.bookings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id UUID NOT NULL,
+  status booking_status NOT NULL DEFAULT 'pending',
+  ...
+);
+```
+
+Supabase **automatically** creates these REST endpoints:
+
+```
+GET    /rest/v1/bookings          → fetch rows
+POST   /rest/v1/bookings          → insert row
+PATCH  /rest/v1/bookings?id=eq.X  → update row
+DELETE /rest/v1/bookings?id=eq.X  → delete row
+```
+
+You never write these endpoints. They exist the moment the table exists.
+
+---
+
+## How the App Uses It
+
+The app never calls these REST endpoints directly. Instead it uses the **`supabase-js` client library** which wraps them:
+
+```typescript
+// This line in the app:
+supabase.from("bookings").select("*").eq("customer_id", user.id)
+
+// Translates to this HTTP call internally:
+GET /rest/v1/bookings?customer_id=eq.USER_ID
+Authorization: Bearer JWT_TOKEN
+```
+
+The library handles authentication, filtering, and response parsing automatically.
+
+---
+
+## What Controls Access
+
+The API exists for every table but **RLS policies** control who can actually use it:
+
+```sql
+-- This policy means only the booking owner or staff can read it
+CREATE POLICY "bookings_select" ON public.bookings FOR SELECT TO authenticated
+  USING (auth.uid() = customer_id OR has_role(auth.uid(), 'manager'));
+```
+
+If a customer tries to read another customer's bookings, Supabase returns an empty result — not an error, just no data.
+
+---
+
+## The Two Keys
+
+| Key | Used for | Safe to expose? |
+|-----|----------|----------------|
+| `anon key` | Frontend app — respects RLS | Yes, public |
+| `service_role key` | Edge functions — bypasses RLS | No, server only |
+
+Your frontend uses the anon key. Your edge functions use the service role key to do admin operations like creating users.
+
+---
+
+## Summary
+
+You created the API by writing SQL migrations. Supabase read those migrations, created the tables, and automatically generated the REST + realtime API on top of them. The `supabase-js` library in the frontend is just a typed wrapper around those auto-generated endpoints.

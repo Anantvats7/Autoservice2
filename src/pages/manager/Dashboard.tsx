@@ -25,7 +25,7 @@ const ManagerDashboard = () => {
   const thisMonthHistory = history.filter((h) => new Date(h.service_date).getTime() >= monthAgo);
   const totalRevenue = thisMonthHistory.reduce((s, h) => s + Number(h.cost || 0), 0);
   const totalBookings = bookings.length;
-  const completedCount = bookings.filter((b) => b.status === "completed").length;
+  const completedCount = bookings.filter((b) => b.status === "completed" || b.status === "released").length;
   const completionRate = totalBookings > 0 ? Math.round((completedCount / totalBookings) * 100) : 0;
   const lowStock = inventory.filter((i) => i.quantity <= i.reorder_level);
 

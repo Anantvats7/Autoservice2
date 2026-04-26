@@ -437,6 +437,20 @@ const AIAssistant = () => {
         </div>
       </div>
 
+      {/* Active vehicle context banner */}
+      {activeVehicle && (
+        <div className="flex items-center gap-2 py-2 px-3 bg-primary/5 border border-primary/15 rounded-lg mb-2 text-xs">
+          <Car className="w-3.5 h-3.5 text-primary shrink-0" />
+          <span className="text-on-surface">Talking about your <span className="font-bold text-primary">{activeVehicle.year} {activeVehicle.make} {activeVehicle.model}</span> ({activeVehicle.registration})</span>
+          <button
+            onClick={() => setVehiclePickerOpen((o) => !o)}
+            className="ml-auto text-primary font-bold hover:underline shrink-0"
+          >
+            Change
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div ref={scroller} className="flex-1 overflow-y-auto py-6 space-y-4">
         {messages.length === 0 && (

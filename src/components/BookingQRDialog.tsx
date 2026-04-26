@@ -63,9 +63,20 @@ const BookingQRDialog = ({ bookingId, type, onClose }: Props) => {
           )}
 
           {code && (
-            <p className="mt-4 text-[11px] uppercase tracking-[0.2em] text-muted-foreground font-mono">
-              {code}
-            </p>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground font-mono">
+                {code}
+              </p>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(code);
+                }}
+                className="text-[10px] font-bold text-primary hover:underline px-2 py-1 rounded hover:bg-primary/5 transition-colors"
+                title="Copy code"
+              >
+                Copy
+              </button>
+            </div>
           )}
 
           <div className="mt-5 p-3 bg-surface-container-low rounded-lg flex items-center gap-2 text-xs text-muted-foreground">
